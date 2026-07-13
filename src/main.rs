@@ -541,23 +541,31 @@ async fn do_launch(product_id: u32, path: Option<String>, exe: Option<String>) -
     // An explicit --exe always wins over the cached path.
     let exe_rel = exe.unwrap_or_else(|| cache.exe_rel.clone());
     let mut exe_path = dir.join(exe_rel.replace('\\', std::path::MAIN_SEPARATOR_STR));
-    if !exe_path.exists() {
-        // The product config's `executables.relative` sometimes omits the subdir
-        // the files actually land in (e.g. Splinter Cell Chaos Theory's exe is at
-        // System/splintercell3.exe but the config just says "splintercell3.exe").
-        // Fall back to searching the install dir for the exe basename.
+    if exe_rel.trim().is_empty() || !exe_path.exists() {
         let base = std::path::Path::new(&exe_rel)
             .file_name()
             .map(|f| f.to_owned())
             .unwrap_or_default();
-        match find_exe_in(&dir, &base) {
+        // If we know the exe name, search for it by basename — the config's
+        // `executables.relative` sometimes omits the subdir the files land in (e.g.
+        // Splinter Cell Chaos Theory's exe is at System/splintercell3.exe but the
+        // config just says "splintercell3.exe"). If we DON'T know it (the config
+        // lists no relative exe — e.g. Watch_Dogs resolves it from a registry key),
+        // pick the main game exe by scanning the install dir.
+        let found = if base.is_empty() {
+            find_main_exe(&dir)
+        } else {
+            find_exe_in(&dir, &base)
+        };
+        match found {
             Some(found) => {
-                println!("[launch] exe not at {}; found it at {}", exe_path.display(), found.display());
+                println!("[launch] resolved exe: {}", found.display());
                 exe_path = found;
             }
             None => anyhow::bail!(
-                "executable {} not found (install incomplete?)",
-                exe_path.display()
+                "could not find the game executable under {} (install incomplete?). \
+                 Pass one with --exe <relative\\path.exe>.",
+                dir.display()
             ),
         }
     }
@@ -840,10 +848,12 @@ async fn resolve_launch_online(
     let config = game.configuration.clone().unwrap_or_default();
     let uplay_id = game.uplay_id.unwrap_or(0);
 
+    // Some titles (e.g. Watch_Dogs) list NO `relative:` exe in the config — they
+    // resolve it from a registry key instead. Don't hard-fail: leave exe_rel empty
+    // and let do_launch scan the install dir for the main game exe.
     let exe_rel = match exe {
         Some(e) => e,
-        None => first_executable(&config)
-            .ok_or_else(|| anyhow::anyhow!("could not find a launch exe in the product config; pass --exe"))?,
+        None => first_executable(&config).unwrap_or_default(),
     };
 
     // Real account data for the DRM shim. A paste-only login may not have stored
@@ -925,15 +935,18 @@ fn walk_for_register(v: &serde_yaml::Value, found: &mut Option<String>) {
     }
     match v {
         serde_yaml::Value::Mapping(m) => {
-            for (k, val) in m {
-                if k.as_str() == Some("register") {
-                    if let Some(s) = val.as_str() {
-                        if s.to_uppercase().contains("HKEY") {
-                            *found = Some(s.to_string());
-                            return;
-                        }
+            // Prefer the register that IS the working directory (the install dir),
+            // not some other register in the config (e.g. Watch_Dogs also has an
+            // `…\Exe` register we must NOT treat as the install path).
+            if let Some(reg) = m.get(serde_yaml::Value::from("working_directory")) {
+                if let Some(s) = reg.get("register").and_then(|x| x.as_str()) {
+                    if s.to_uppercase().contains("HKEY") {
+                        *found = Some(s.to_string());
+                        return;
                     }
                 }
+            }
+            for (_k, val) in m {
                 walk_for_register(val, found);
             }
         }
@@ -982,6 +995,47 @@ fn find_exe_in(root: &std::path::Path, base: &std::ffi::OsStr) -> Option<std::pa
     matches
         .into_iter()
         .min_by_key(|p| p.components().count())
+}
+
+/// Pick the main game exe by scanning the install dir, for titles whose config
+/// lists no relative exe (they resolve it from a registry key — e.g. Watch_Dogs →
+/// bin/Watch_Dogs.exe). Skips installers/redistributables and support dirs, then
+/// takes the largest remaining exe (the game binary is invariably the biggest).
+fn find_main_exe(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    const JUNK: &[&str] = &[
+        "vcredist", "vc_redist", "dxsetup", "d3d", "directx", "redist", "unins",
+        "setup", "netfx", "dotnet", "clwireg", "uplayinstaller", "firewall",
+        "gdfinstall", "install", "crashreport", "activation", "cleanup", "helper",
+    ];
+    let mut stack = vec![root.to_path_buf()];
+    let mut best: Option<(u64, std::path::PathBuf)> = None;
+    while let Some(d) = stack.pop() {
+        let rd = match std::fs::read_dir(&d) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+            if !name.ends_with(".exe") {
+                continue;
+            }
+            let path_l = p.to_string_lossy().to_lowercase();
+            // Skip redistributables/installers and anything under a support/ tree.
+            if path_l.contains("/support/") || JUNK.iter().any(|j| name.contains(j)) {
+                continue;
+            }
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            if best.as_ref().map(|(s, _)| size > *s).unwrap_or(true) {
+                best = Some((size, p));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 fn resolve_email(username: &str) -> String {
