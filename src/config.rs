@@ -29,12 +29,20 @@ pub struct Auth {
 }
 
 impl Auth {
-    /// True if `expiration` is in the past (or unparseable → treat as expired so
-    /// we refresh rather than fire a doomed request).
+    /// True only if we have a parseable `expiration` that is in the past. An
+    /// EMPTY or unparseable expiration means "unknown" — the WebAuth SDK capture
+    /// doesn't record one — and must NOT be treated as expired: doing so made
+    /// every online call proactively burn a rememberMe refresh, wearing the
+    /// rememberMe ticket out until it rate-limited/died ("tickets don't last").
+    /// Unknown → assume usable and let the reactive 401 path (connect_demux)
+    /// refresh only when the ticket is actually rejected.
     pub fn is_expired(&self) -> bool {
+        if self.expiration.trim().is_empty() {
+            return false;
+        }
         match chrono::DateTime::parse_from_rfc3339(&self.expiration) {
             Ok(exp) => exp <= chrono::Utc::now(),
-            Err(_) => true,
+            Err(_) => false,
         }
     }
 }
