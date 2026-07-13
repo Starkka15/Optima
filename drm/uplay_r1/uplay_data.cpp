@@ -1,0 +1,1138 @@
+#include "pch.h"
+#include <fstream>
+#include <sstream>
+#include <vector>
+
+
+#define UPLAY_EXPORT extern "C" __declspec(dllexport)
+
+HANDLE fileuplay = 0;
+void* DirectoryBuffer = 0;
+
+bool created = false;
+
+int val = 0;
+
+struct Chunks
+{
+	ULONG_PTR d1;
+	void* d2;
+};
+struct Overmapped
+{
+	signed char pd[4];
+	int32_t f4;
+	int32_t f8;
+};
+struct FileOpen
+{
+	// Holds a Win32 HANDLE the game passes back to SAVE_Read/Write. Must be
+	// pointer-width — on 64-bit a DWORD would truncate the handle. (Original
+	// Mini_Uplay was 32-bit only.)
+	ULONG_PTR d1;
+};
+struct FileOpenTwo
+{
+	DWORD addr1;
+	DWORD addr2;
+	DWORD addr3;
+};
+struct FileRead
+{
+	DWORD addr1;
+	DWORD addr2;
+	DWORD addr3;
+};
+struct FileList
+{
+	DWORD num;
+	void* bufferstring;
+	DWORD pointer;
+};
+struct MyFileRef
+{
+	HANDLE hFile;
+	int numfile;
+	char nameoffile[4024];
+};
+std::vector<MyFileRef> FileVector;
+
+namespace Uplay_Configuration
+{
+	char UserName[0x200] = { "Rat" };
+	char UserEmail[0x200] = { "UplayEmu@rat43.com" };
+	char password[0x200] = { "UplayPassword74" };
+	char GameLanguage[0x200] = { "en-US" };
+	char SaveDir[MAX_PATH] = { "Default" };
+	char UserId[1024] = { "c91c91c9-1c91-c91c-91c9-1c91c91c91c9" };
+	char CdKey[1024] = { "1111-2222-3333-4444" };
+	char TickedId[1024] = { "noT456umPqRt" };
+	bool Offline = false;
+	bool appowned = true;
+
+	int cdkey1 = 0;
+	int cdkey2 = 0;
+	uint32_t gameAppId = 0;
+}
+
+// Optima diagnostic: append each significant call to a log next to the DLL so we
+// can see exactly which Uplay function the game called last before a crash.
+static void olog(const char* msg)
+{
+	FILE* f = fopen("optima_uplay.log", "a");
+	if (f) { fprintf(f, "%s\n", msg); fclose(f); }
+}
+
+DWORD    GetFilePointer(HANDLE hFile) {
+	return SetFilePointer(hFile, 0, NULL, FILE_CURRENT);
+}
+void CreatePath(const char* Path)
+{
+	if (!created)
+	{
+		CHAR data[MAX_PATH] = { 0 };
+		lstrcpyA(&data[0], Path);
+		int size = lstrlenA(data) + 1;
+		CHAR out[MAX_PATH] = { 0 };
+		int i = 0;
+		for (;;)
+		{
+			if (data[i] == NULL)
+				break;
+
+			memcpy(&out[i], &data[i], 1);
+			if (out[i] == '\\')
+			{
+				if (GetFileAttributesA(out) == INVALID_FILE_ATTRIBUTES)
+				{
+					CreateDirectoryA(out, NULL);
+				}
+			}
+			i++;
+		}
+		if (GetFileAttributesA(out) == INVALID_FILE_ATTRIBUTES)
+		{
+			CreateDirectoryA(out, NULL);
+		}
+		created = true;
+	}
+	return;
+}
+static char datapp[1024];
+const char* AttachDirFile(const char* Path, const char* file)
+{
+	memset(datapp, 0, sizeof(datapp));
+	sprintf_s(datapp, sizeof(datapp), "%s\\%s", Path, file);
+	return datapp;
+}
+const char* AppIdtoString(int appid)
+{
+	std::stringstream stream;
+	stream << appid;
+	return stream.str().c_str();
+}
+char dataqq[1024] = { 0 };
+char dt[1024] = { 0 };
+char tmppath[1024] = { 0 };
+const char* FormatDir(const char* dir, bool setslashes)
+{
+	if (dataqq[0] == 0)
+	{
+		if (strcmp(Uplay_Configuration::SaveDir, "Default") == 0)
+		{
+			GetModuleFileNameA(UplayModule, tmppath, MAX_PATH);
+			int size = lstrlenA(tmppath);
+			for (int i = size; i > 0; i--)
+			{
+				if (tmppath[i] == '\\')
+				{
+					memset(&tmppath[i], 0, size - i);
+					break;
+				}
+			}
+			sprintf(dataqq, "%s\\%s\\%s\\%u", tmppath, dir, Uplay_Configuration::UserName, Uplay_Configuration::gameAppId);
+			return dataqq;
+		}
+		sprintf(dataqq, "%s\\%s\\%s\\%s", Uplay_Configuration::SaveDir, dir, Uplay_Configuration::UserName, AppIdtoString(Uplay_Configuration::gameAppId));
+		return dataqq;
+	}
+	return dataqq;
+
+}
+
+bool IsTargetExist(LPCSTR path)
+{
+	if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES)
+		return false;
+	return true;
+}
+
+
+
+// Exports implementations
+
+
+UPLAY_EXPORT int UPLAY_ACH_EarnAchievement()
+{
+	olog("UPLAY_ACH_EarnAchievement");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_ACH_GetAchievementImage()
+{
+	olog("UPLAY_ACH_GetAchievementImage");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_ACH_GetAchievements()
+{
+	olog("UPLAY_ACH_GetAchievements");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_ACH_ReleaseAchievementImage()
+{
+	olog("UPLAY_ACH_ReleaseAchievementImage");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_ACH_ReleaseAchievementList()
+{
+	olog("UPLAY_ACH_ReleaseAchievementList");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_ACH_Write()
+{
+	olog("UPLAY_ACH_Write");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_AVATAR_Get(void* buf1)
+{
+	olog("UPLAY_AVATAR_Get");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_AVATAR_GetAvatarIdForCurrentUser()
+{
+	olog("UPLAY_AVATAR_GetAvatarIdForCurrentUser");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_AVATAR_GetBitmap()
+{
+	olog("UPLAY_AVATAR_GetBitmap");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_AVATAR_Release()
+{
+	olog("UPLAY_AVATAR_Release");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_ClearGameSession()
+{
+	olog("UPLAY_ClearGameSession");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_AddPlayedWith()
+{
+	olog("UPLAY_FRIENDS_AddPlayedWith");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_AddToBlackList()
+{
+	olog("UPLAY_FRIENDS_AddToBlackList");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_DisableFriendMenuItem()
+{
+	olog("UPLAY_FRIENDS_DisableFriendMenuItem");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_EnableFriendMenuItem()
+{
+	olog("UPLAY_FRIENDS_EnableFriendMenuItem");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_GetFriendList()
+{
+	olog("UPLAY_FRIENDS_GetFriendList");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_Init()
+{
+	olog("UPLAY_FRIENDS_Init");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_InviteToGame()
+{
+	olog("UPLAY_FRIENDS_InviteToGame");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_IsBlackListed()
+{
+	olog("UPLAY_FRIENDS_IsBlackListed");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_IsFriend()
+{
+	olog("UPLAY_FRIENDS_IsFriend");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_RemoveFriendship()
+{
+	olog("UPLAY_FRIENDS_RemoveFriendship");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_RemoveFromBlackList()
+{
+	olog("UPLAY_FRIENDS_RemoveFromBlackList");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_RequestFriendship()
+{
+	olog("UPLAY_FRIENDS_RequestFriendship");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_RespondToGameInvite()
+{
+	olog("UPLAY_FRIENDS_RespondToGameInvite");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_ShowFriendSelectionUI()
+{
+	olog("UPLAY_FRIENDS_ShowFriendSelectionUI");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_FRIENDS_ShowInviteFriendsToGameUI()
+{
+	olog("UPLAY_FRIENDS_ShowInviteFriendsToGameUI");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_GetLastError()
+{
+	olog("UPLAY_GetLastError");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_GetNextEvent()
+{
+	olog("UPLAY_GetNextEvent");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_GetOverlappedOperationResult(void* buf1, int* buf2)
+{
+	olog("UPLAY_GetOverlappedOperationResult");
+	Overmapped* ovr = (Overmapped*)buf1;
+	if (!ovr->f4) {
+		return 0;
+	}
+	else {
+		*buf2 = ovr->f8;
+		return 1;
+	}
+}
+UPLAY_EXPORT int UPLAY_HasOverlappedOperationCompleted(void* buf1)
+{
+	olog("UPLAY_HasOverlappedOperationCompleted");
+	Overmapped* ovr = (Overmapped*)buf1;
+	return ovr->f4;
+}
+UPLAY_EXPORT int UPLAY_INSTALLER_AreChunksInstalled()
+{
+	olog("UPLAY_INSTALLER_AreChunksInstalled");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_INSTALLER_GetChunkIdsFromTag()
+{
+	olog("UPLAY_INSTALLER_GetChunkIdsFromTag");
+	return 0;
+}
+Chunks* chunks = 0;
+UPLAY_EXPORT int UPLAY_INSTALLER_GetChunks(void* buf1)
+{
+	olog("UPLAY_INSTALLER_GetChunks");
+	chunks = (Chunks*)VirtualAlloc(0, 10, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+	chunks->d1 = 1;
+	chunks->d2 = VirtualAlloc(0, 1000, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+#ifdef _WIN64
+	memcpy(buf1, &chunks, 8);
+#else
+	memcpy(buf1, &chunks, 4);
+#endif 
+	return 1;
+
+}
+UPLAY_EXPORT const char* UPLAY_INSTALLER_GetLanguageUtf8()
+{
+	olog("UPLAY_INSTALLER_GetLanguageUtf8");
+	return Uplay_Configuration::GameLanguage;
+}
+UPLAY_EXPORT int UPLAY_INSTALLER_Init()
+{
+	olog("UPLAY_INSTALLER_Init");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_INSTALLER_ReleaseChunkIdList()
+{
+	olog("UPLAY_INSTALLER_ReleaseChunkIdList");
+	VirtualFree((void*)chunks, 0, MEM_DECOMMIT);
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_INSTALLER_UpdateInstallOrder()
+{
+	olog("UPLAY_INSTALLER_UpdateInstallOrder");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_Init()
+{
+	olog("UPLAY_Init");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_METADATA_ClearContinuousTag()
+{
+	olog("UPLAY_METADATA_ClearContinuousTag");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_METADATA_SetContinuousTag()
+{
+	olog("UPLAY_METADATA_SetContinuousTag");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_METADATA_SetSingleEventTag()
+{
+	olog("UPLAY_METADATA_SetSingleEventTag");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_OPTIONS_Apply()
+{
+	olog("UPLAY_OPTIONS_Apply");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_OPTIONS_Close()
+{
+	olog("UPLAY_OPTIONS_Close");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_OPTIONS_Enumerate()
+{
+	olog("UPLAY_OPTIONS_Enumerate");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OPTIONS_Get()
+{
+	olog("UPLAY_OPTIONS_Get");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OPTIONS_Open()
+{
+	olog("UPLAY_OPTIONS_Open");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OPTIONS_ReleaseKeyValueList()
+{
+	olog("UPLAY_OPTIONS_ReleaseKeyValueList");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OPTIONS_Set()
+{
+	olog("UPLAY_OPTIONS_Set");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OPTIONS_SetInGameState()
+{
+	olog("UPLAY_OPTIONS_SetInGameState");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OVERLAY_SetShopUrl()
+{
+	olog("UPLAY_OVERLAY_SetShopUrl");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OVERLAY_Show()
+{
+	olog("UPLAY_OVERLAY_Show");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OVERLAY_ShowBrowserUrl()
+{
+	olog("UPLAY_OVERLAY_ShowBrowserUrl");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OVERLAY_ShowFacebookAuthentication()
+{
+	olog("UPLAY_OVERLAY_ShowFacebookAuthentication");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OVERLAY_ShowNotification()
+{
+	olog("UPLAY_OVERLAY_ShowNotification");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_OVERLAY_ShowShopUrl()
+{
+	olog("UPLAY_OVERLAY_ShowShopUrl");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_DisablePartyMemberMenuItem()
+{
+	olog("UPLAY_PARTY_DisablePartyMemberMenuItem");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_EnablePartyMemberMenuItem()
+{
+	olog("UPLAY_PARTY_EnablePartyMemberMenuItem");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_GetFullMemberList()
+{
+	olog("UPLAY_PARTY_GetFullMemberList");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_GetId()
+{
+	olog("UPLAY_PARTY_GetId");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_GetInGameMemberList()
+{
+	olog("UPLAY_PARTY_GetInGameMemberList");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_Init()
+{
+	olog("UPLAY_PARTY_Init");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_InvitePartyToGame()
+{
+	olog("UPLAY_PARTY_InvitePartyToGame");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_InviteToParty()
+{
+	olog("UPLAY_PARTY_InviteToParty");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_IsInParty()
+{
+	olog("UPLAY_PARTY_IsInParty");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_IsPartyLeader()
+{
+	olog("UPLAY_PARTY_IsPartyLeader");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_PromoteToLeader()
+{
+	olog("UPLAY_PARTY_PromoteToLeader");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_RespondToGameInvite()
+{
+	olog("UPLAY_PARTY_RespondToGameInvite");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_SetGuest()
+{
+	olog("UPLAY_PARTY_SetGuest");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PARTY_SetUserData()
+{
+	olog("UPLAY_PARTY_SetUserData");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_PARTY_ShowGameInviteOverlayUI()
+{
+	olog("UPLAY_PARTY_ShowGameInviteOverlayUI");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_PRESENCE_SetPresence()
+{
+	olog("UPLAY_PRESENCE_SetPresence");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_PeekNextEvent()
+{
+	olog("UPLAY_PeekNextEvent");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_Quit()
+{
+	olog("UPLAY_Quit");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_Release()
+{
+	olog("UPLAY_Release");
+	return 1;
+}
+const char* savefile = "";
+long position = 0;
+long firstpos = 0;
+void* tempbuffer = VirtualAlloc(NULL, 0x80000, MEM_COMMIT, PAGE_READWRITE);
+UPLAY_EXPORT int UPLAY_SAVE_Close(HANDLE hFiledata)
+{
+	olog("UPLAY_SAVE_Close");
+	SetFilePointer(hFiledata, 0, 0, 0);
+	DWORD data = 0;
+	DWORD datat = 0;
+	ReadFile(hFiledata, &data, 4, &datat, 0);
+	DWORD tt = 0x224;
+	if (data == 0)
+	{
+		SetFilePointer(hFiledata, 0, 0, 0);
+		WriteFile(hFiledata, &tt, 4, &data, 0);
+		SetFilePointer(hFiledata, 0x28, 0, 0);
+		for (std::vector<MyFileRef>::size_type f = 0; f < FileVector.size(); f++)	// Search thorugh initialized files
+		{
+			if (FileVector[f].hFile == hFiledata)
+			{
+				WriteFile(hFiledata, FileVector[f].nameoffile, 0x200, &data, NULL);
+				break;
+			}
+		}
+		SetFilePointer(hFiledata, 0, 0, 0);
+	}
+	CloseHandle(hFiledata);
+	return 1;
+}
+const char* dir = 0;
+int whichfile = 0;
+char name[4024] = { 0 };
+UPLAY_EXPORT int UPLAY_SAVE_GetSavegames(void* listpointer, void* mystruct)
+{
+	olog("UPLAY_SAVE_GetSavegames");
+	void* FirstPointer = VirtualAlloc(NULL, 0x80000, MEM_COMMIT, PAGE_READWRITE);
+	void* SecondPointer = VirtualAlloc(NULL, 0x80000, MEM_COMMIT, PAGE_READWRITE);
+	ULONG_PTR SecondPointerAddr = (ULONG_PTR)SecondPointer;
+	const char* myconstant = AttachDirFile(dir, "*.save");
+	ULONG_PTR valueofiles = 0;
+	WIN32_FIND_DATAA fd = { 0 };
+	HANDLE firstFile = FindFirstFileA(myconstant, &fd);
+
+	if (firstFile != INVALID_HANDLE_VALUE)
+	{
+		do
+		{
+
+			if (fd.dwFileAttributes == FILE_ATTRIBUTE_ARCHIVE)
+			{
+				void* ThirdPointer = VirtualAlloc(NULL, 0x3000, MEM_COMMIT, PAGE_READWRITE);
+				int filecounternm = 0;
+				char bytesdat[270] = { 0 };
+				strcpy(bytesdat, (char*)fd.cFileName);
+				int size = strlen(bytesdat);
+				for (int i = size; i > 0; i--)
+				{
+					if (bytesdat[i] == '.')
+					{
+						memset(&bytesdat[i], 0, size - i);
+						filecounternm = strtoull(bytesdat, NULL, 16);
+						break;
+					}
+				}
+				HANDLE hFoundFile = CreateFileA(AttachDirFile(dir, (char*)fd.cFileName), GENERIC_READ, 1, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+				DWORD FileSize = GetFileSize(hFoundFile, NULL);
+				DWORD val = FileSize - 0x228;
+				DWORD FilePointer = SetFilePointer(hFoundFile, 0x28, NULL, NULL);
+				DWORD bytesreaded = 0;
+				char* datar2 = (char*)VirtualAlloc(NULL, 0x200, MEM_COMMIT, PAGE_READWRITE);
+				ReadFile(hFoundFile, datar2, 0x200, &bytesreaded, NULL);
+				FileList* flst = (FileList*)ThirdPointer;
+				flst->bufferstring = datar2;
+				flst->num = (DWORD)filecounternm;
+				flst->pointer = val;
+#ifdef _WIN64
+				memcpy((void*)SecondPointerAddr, &ThirdPointer, 8);
+				SecondPointerAddr += 8;
+#else
+				memcpy((void*)SecondPointerAddr, &ThirdPointer, 4);
+				SecondPointerAddr += 4;
+#endif			
+				CloseHandle(hFoundFile);
+				valueofiles++;
+			}
+
+		} while (FindNextFileA(firstFile, &fd) == TRUE);
+		FindClose(firstFile);
+#ifdef _WIN64
+		memcpy(FirstPointer, &valueofiles, 8);
+		memcpy((void*)((ULONG_PTR)FirstPointer + 8), &SecondPointer, 8);
+#else
+		memcpy(FirstPointer, &valueofiles, 4);
+		memcpy((void*)((ULONG_PTR)FirstPointer + 4), &SecondPointer, 4);
+#endif
+	}
+#ifdef _WIN64
+	memcpy(listpointer, &FirstPointer, 8);
+#else
+	memcpy(listpointer, &FirstPointer, 4);
+#endif
+	FileRead * flr = (FileRead*)mystruct;
+	flr->addr1++;
+	flr->addr2 = 1;
+	flr->addr3 = 0;
+
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_SAVE_Open(int dp1, int dp2, void* buf1, void* buf2)		// Init UPLAY SAVES
+{
+	olog("UPLAY_SAVE_Open");
+	char file[1024] = { 0 };
+	sprintf(file, "0x%x.save", dp1);
+	whichfile = dp1;
+	savefile = AttachDirFile(dir, file);
+	tempbuffer = VirtualAlloc(0, 0x228, MEM_COMMIT, PAGE_READWRITE);
+	MyFileRef ref = { 0 };
+	if (dp2 == 0)
+	{
+		FileOpen* fp = (FileOpen*)buf1;
+		FileOpenTwo* fp2 = (FileOpenTwo*)buf2;
+		HANDLE fileuplayt = CreateFileA(savefile, GENERIC_READ, NULL, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (fileuplayt == INVALID_HANDLE_VALUE)
+		{
+			fp2->addr1++;
+			fp2->addr2 = 1;
+			fp2->addr3 = 0;
+			return 0;
+		}
+		fp->d1 = (ULONG_PTR)fileuplayt;
+		fp2->addr1++;
+		fp2->addr2 = 1;
+		fp2->addr3 = 0;
+		ref.hFile = fileuplayt;
+		ref.numfile = dp1;
+		FileVector.push_back(ref);
+		return 1;
+	}
+	else
+	{
+		FileOpen* fp = (FileOpen*)buf1;
+		FileOpenTwo* fp2 = (FileOpenTwo*)buf2;
+		HANDLE fileuplayt = CreateFileA(savefile, SE_GROUP_LOGON_ID, NULL, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (fileuplayt == INVALID_HANDLE_VALUE)
+		{
+			fp2->addr1++;
+			fp2->addr2 = 1;
+			fp2->addr3 = 0;
+			return 0;
+		}
+		DWORD ld;
+		WriteFile(fileuplayt, tempbuffer, 0x228, &ld, 0);
+		fp->d1 = (ULONG_PTR)fileuplayt;
+		fp2->addr1++;
+		fp2->addr2 = 1;
+		fp2->addr3 = 0;
+		ref.hFile = fileuplayt;
+		ref.numfile = dp1;
+		FileVector.push_back(ref);
+		return 1;
+	}
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_SAVE_Read(HANDLE hFile, SIZE_T datatoread, long offset, void* dt1, DWORD * bytesreaded, void* mystruct)
+{
+	olog("UPLAY_SAVE_Read");
+	void* ReadedData = 0;
+	if (hFile != INVALID_HANDLE_VALUE)
+	{
+#ifdef _WIN64
+		memcpy(&ReadedData, dt1, 8);
+#else
+		memcpy(&ReadedData, dt1, 4);
+#endif 
+		SetFilePointer(hFile, 0x228 + offset, NULL, NULL);
+		DWORD wrote;
+		if (!ReadFile(hFile, ReadedData, datatoread, bytesreaded, NULL))
+		{
+			FileRead* flr = (FileRead*)mystruct;
+			flr->addr1++;
+			flr->addr2 = 1;
+			flr->addr3 = 0;
+			return 0;
+		}
+		FileRead* flr = (FileRead*)mystruct;
+		flr->addr1++;
+		flr->addr2 = 1;
+		flr->addr3 = 0;
+		return 1;
+	}
+	FileRead* flr = (FileRead*)mystruct;
+	flr->addr1++;
+	flr->addr2 = 1;
+	flr->addr3 = 0;
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_SAVE_ReleaseGameList(void* listpointer)
+{
+	olog("UPLAY_SAVE_ReleaseGameList");
+	VirtualFree(listpointer, NULL, MEM_DECOMMIT);
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_SAVE_Remove(int fileindex, void* filestruct)
+{
+	olog("UPLAY_SAVE_Remove");
+	char file[1024] = { 0 };
+	sprintf(file, "%d.save", fileindex);
+	savefile = AttachDirFile(dir, file);
+
+	if (!DeleteFileA(savefile))
+	{
+		FileRead* flr = (FileRead*)filestruct;
+		flr->addr1++;
+		flr->addr2 = 1;
+		flr->addr3 = 0;
+		return 0;
+	}
+	FileRead* flr = (FileRead*)filestruct;
+	flr->addr1++;
+	flr->addr2 = 1;
+	flr->addr3 = 0;
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_SAVE_SetName(HANDLE hFileData, const char* namefile)
+{
+	olog("UPLAY_SAVE_SetName");
+	for (std::vector<MyFileRef>::size_type f = 0; f < FileVector.size(); f++)	// Search thorugh initialized files
+	{
+		if (FileVector[f].hFile == hFileData)
+		{
+			strcpy(FileVector[f].nameoffile, namefile);
+			break;
+		}
+	}
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_SAVE_Write(HANDLE hFile, SIZE_T datatowrite, void* buf1, void* buf2)
+{
+	olog("UPLAY_SAVE_Write");
+	if (hFile != INVALID_HANDLE_VALUE)
+	{
+		void* WriteData = 0;
+#ifdef _WIN64
+		memcpy(&WriteData, buf1, 8);
+#else
+		memcpy(&WriteData, buf1, 4);
+#endif // _WIN64
+		DWORD dat = 0;
+		FileRead* flr = (FileRead*)buf2;
+		if (!WriteFile(hFile, WriteData, datatowrite, &dat, NULL))
+		{
+			flr->addr1++;
+			flr->addr2 = 1;
+			flr->addr3 = 0;
+			return 0;
+		}
+		
+		flr->addr1++;
+		flr->addr2 = 1;
+		flr->addr3 = 0;
+		return 1;
+	}
+	FileRead* flr = (FileRead*)buf2;
+	flr->addr1++;
+	flr->addr2 = 1;
+	flr->addr3 = 0;
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_STORE_Checkout()
+{
+	olog("UPLAY_STORE_Checkout");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_STORE_GetPartner()
+{
+	olog("UPLAY_STORE_GetPartner");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_STORE_GetProducts()
+{
+	olog("UPLAY_STORE_GetProducts");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_STORE_ReleaseProductsList()
+{
+	olog("UPLAY_STORE_ReleaseProductsList");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_STORE_ShowProductDetails()
+{
+	olog("UPLAY_STORE_ShowProductDetails");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_STORE_ShowProducts()
+{
+	olog("UPLAY_STORE_ShowProducts");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_SetGameSession()
+{
+	olog("UPLAY_SetGameSession");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_SetLanguage(const char* language)
+{
+	olog("UPLAY_SetLanguage");
+	strcpy(Uplay_Configuration::GameLanguage, language);
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_Start()
+{
+	olog("UPLAY_Start");
+	CHAR INI[MAX_PATH] = { 0 };					// Get ini directory
+	GetModuleFileNameA(UplayModule, INI, MAX_PATH);
+	int Size = lstrlenA(INI);
+	for (int i = Size; i > 0; i--)
+	{
+		if (INI[i] == '\\')
+		{
+			lstrcpyA(&INI[i], "\\Uplay.ini");
+			break;
+		}
+	}
+	if (!IsTargetExist(INI))
+	{
+		MessageBoxA(0, "Couldn't find Uplay.ini.", "Uplay", MB_ICONERROR);
+		ExitProcess(0);
+	}
+	Uplay_Configuration::appowned = GetPrivateProfileIntA("Uplay", "IsAppOwned", 0, INI) == TRUE;		// Read ini informations
+	Uplay_Configuration::Offline = GetPrivateProfileIntA("Uplay", "UplayConnection", 0, INI) == TRUE;
+	Uplay_Configuration::gameAppId = GetPrivateProfileIntA("Uplay", "AppId", 0, INI);
+	GetPrivateProfileStringA("Uplay", "Username", 0, Uplay_Configuration::UserName, 0x200, INI);
+	GetPrivateProfileStringA("Uplay", "Email", 0, Uplay_Configuration::UserEmail, 0x200, INI);
+	GetPrivateProfileStringA("Uplay", "Password", 0, Uplay_Configuration::password, 0x200, INI);
+	GetPrivateProfileStringA("Uplay", "SavePath", 0, Uplay_Configuration::SaveDir, MAX_PATH, INI);
+	GetPrivateProfileStringA("Uplay", "Language", 0, Uplay_Configuration::GameLanguage, 0x200, INI);
+	GetPrivateProfileStringA("Uplay", "CdKey", 0, Uplay_Configuration::CdKey, 0x200, INI);
+	GetPrivateProfileStringA("Uplay", "UserId", 0, Uplay_Configuration::UserId, 0x200, INI);
+	GetPrivateProfileStringA("Uplay", "TickedId", 0, Uplay_Configuration::TickedId, 0x200, INI);
+
+	dir = FormatDir("ApiLocalStorage", 0);			// Storage init
+	CreatePath(dir);
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_StartCN()
+{
+	olog("UPLAY_StartCN");
+	return UPLAY_Start();
+}
+UPLAY_EXPORT int UPLAY_Startup()
+{
+	olog("UPLAY_Startup");
+	return UPLAY_Start();
+}
+UPLAY_EXPORT int UPLAY_USER_ClearGameSession()
+{
+	olog("UPLAY_USER_ClearGameSession");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_USER_ConsumeItem()
+{
+	olog("UPLAY_USER_ConsumeItem");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_USER_GetAccountId()
+{
+	olog("UPLAY_USER_GetAccountId");
+	return 0;
+}
+UPLAY_EXPORT const char* UPLAY_USER_GetAccountIdUtf8()
+{
+	olog("UPLAY_USER_GetAccountIdUtf8");
+	return Uplay_Configuration::UserId;
+}
+UPLAY_EXPORT int UPLAY_USER_GetCPUScore()
+{
+	olog("UPLAY_USER_GetCPUScore");
+	return 0;
+}
+UPLAY_EXPORT const char* UPLAY_USER_GetCdKeyUtf8()
+{
+	olog("UPLAY_USER_GetCdKeyUtf8");
+	return Uplay_Configuration::CdKey;
+}
+UPLAY_EXPORT int UPLAY_USER_GetCdKeys()
+{
+	olog("UPLAY_USER_GetCdKeys");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_USER_GetConsumableItems(void* buf1)
+{
+	olog("UPLAY_USER_GetConsumableItems");
+#ifdef _WIN64
+	memset(buf1, 0, 8);
+#else
+	memset(buf1, 0, 4);
+#endif
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_USER_GetCredentials()
+{
+	olog("UPLAY_USER_GetCredentials");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_USER_GetEmail()
+{
+	olog("UPLAY_USER_GetEmail");
+	return 0;
+}
+UPLAY_EXPORT const char* UPLAY_USER_GetEmailUtf8()
+{
+	olog("UPLAY_USER_GetEmailUtf8");
+	return Uplay_Configuration::UserEmail;
+}
+UPLAY_EXPORT int UPLAY_USER_GetGPUScore()
+{
+	olog("UPLAY_USER_GetGPUScore");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_USER_GetGPUScoreConfidenceLevel()
+{
+	olog("UPLAY_USER_GetGPUScoreConfidenceLevel");
+	return 0;
+}
+UPLAY_EXPORT const char* UPLAY_USER_GetNameUtf8()
+{
+	olog("UPLAY_USER_GetNameUtf8");
+	return Uplay_Configuration::UserName;
+}
+UPLAY_EXPORT int UPLAY_USER_GetPassword()
+{
+	olog("UPLAY_USER_GetPassword");
+	return 0;
+}
+UPLAY_EXPORT const char* UPLAY_USER_GetPasswordUtf8()
+{
+	olog("UPLAY_USER_GetPasswordUtf8");
+	return Uplay_Configuration::password;
+}
+UPLAY_EXPORT int UPLAY_USER_GetProfile()
+{
+	olog("UPLAY_USER_GetProfile");
+	return 0;
+}
+UPLAY_EXPORT const char* UPLAY_USER_GetTicketUtf8()
+{
+	olog("UPLAY_USER_GetTicketUtf8");
+	return Uplay_Configuration::TickedId;
+}
+UPLAY_EXPORT int UPLAY_USER_GetUsername()
+{
+	olog("UPLAY_USER_GetUsername");
+	return 0;
+}
+UPLAY_EXPORT const char* UPLAY_USER_GetUsernameUtf8()
+{
+	olog("UPLAY_USER_GetUsernameUtf8");
+	return Uplay_Configuration::UserName;
+}
+UPLAY_EXPORT int UPLAY_USER_IsConnected()
+{
+	olog("UPLAY_USER_IsConnected");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_USER_IsInOfflineMode()
+{
+	olog("UPLAY_USER_IsInOfflineMode");
+	// Force offline for single-player launches. When this returns 0 (online),
+	// AnvilNext titles (AC4) spin up a cloud-save sync path — the
+	// SaveGameManagerBackgroundThread — that expects a real Ubisoft Connect
+	// backend and null-derefs its manager without one. Reporting offline makes
+	// the game use purely local saves and never start that thread. Ownership is
+	// unaffected (IsOwned/IsConnected still succeed). OPTIMA_ONLINE_SAVES=1 opts
+	// back into the online path if a title ever needs it.
+	if (GetEnvironmentVariableA("OPTIMA_ONLINE_SAVES", 0, 0) != 0)
+		return Uplay_Configuration::Offline;
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_USER_IsOwned(int data)
+{
+	olog("UPLAY_USER_IsOwned");
+	return Uplay_Configuration::appowned;
+}
+UPLAY_EXPORT int UPLAY_USER_ReleaseCdKeyList()
+{
+	olog("UPLAY_USER_ReleaseCdKeyList");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_USER_ReleaseConsumeItemResult()
+{
+	olog("UPLAY_USER_ReleaseConsumeItemResult");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_USER_ReleaseProfile()
+{
+	olog("UPLAY_USER_ReleaseProfile");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_USER_SetGameSession()
+{
+	olog("UPLAY_USER_SetGameSession");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_Update()
+{
+	olog("UPLAY_Update");
+	// Returns whether an API event is pending for the game to process. Our emu
+	// never queues events (UPLAY_GetNextEvent always returns none), so the honest
+	// answer is 0. Returning 1 makes AnvilNext titles (AC4) trust that an event
+	// object exists and dispatch on it — but the event slot was never populated,
+	// so they null-deref. The reference emu returns 1 and only gets away with it
+	// on Windows; 0 is both correct and what unblocks AC4's boot under Proton.
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_WIN_GetActions()
+{
+	olog("UPLAY_WIN_GetActions");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_WIN_GetRewards()
+{
+	olog("UPLAY_WIN_GetRewards");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_WIN_GetUnitBalance()
+{
+	olog("UPLAY_WIN_GetUnitBalance");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_WIN_RefreshActions()
+{
+	olog("UPLAY_WIN_RefreshActions");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_WIN_ReleaseActionList()
+{
+	olog("UPLAY_WIN_ReleaseActionList");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_WIN_ReleaseRewardList()
+{
+	olog("UPLAY_WIN_ReleaseRewardList");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_WIN_SetActionsCompleted()
+{
+	olog("UPLAY_WIN_SetActionsCompleted");
+	return 1;
+}
+UPLAY_EXPORT int UPLAY_CHAT_GetHistory()
+{
+	olog("UPLAY_CHAT_GetHistory");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_CHAT_Init()
+{
+	olog("UPLAY_CHAT_Init");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_CHAT_ReleaseHistoryList()
+{
+	olog("UPLAY_CHAT_ReleaseHistoryList");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_CHAT_SendMessage()
+{
+	olog("UPLAY_CHAT_SendMessage");
+	return 0;
+}
+UPLAY_EXPORT int UPLAY_CHAT_SentMessagesRead()
+{
+	olog("UPLAY_CHAT_SentMessagesRead");
+	return 0;
+}

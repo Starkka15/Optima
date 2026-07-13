@@ -1,0 +1,8 @@
+/target
+*.db
+# Local session/account state never belongs in the repo (it lives in the user's
+# data dir, ~/.local/share/optima/, not here) — but ignore stray copies anyway.
+auth.toml
+profile.toml
+# Cargo.lock IS committed on purpose: this is an application, and pinning exact
+# dependency versions lets anyone reproduce and audit the exact build.
