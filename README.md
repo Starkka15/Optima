@@ -59,26 +59,49 @@ The protobuf wire formats were reverse-engineered by the
 [YoobieRE](https://github.com/YoobieRE) project (Optima's `proto/` schemas derive
 from their work); Optima is an independent Rust reimplementation of the client.
 
-## DRM shim
+## DRM shims
 
-Older Ubisoft single-player titles load a folder-local `uplay_r1_loader.dll` and
-expect it to answer a small set of ownership/overlay calls. Optima ships a
-compatibility shim that answers those calls for a game **you own and have already
-downloaded**, so it boots without the Ubisoft Connect overlay running. It does
-**not** bypass any cryptographic license check and does nothing for titles you
-don't own.
+Older Ubisoft single-player titles load a folder-local Ubisoft loader DLL and
+expect it to answer a small set of ownership/overlay calls. Optima ships
+compatibility shims that answer those calls for a game **you own and have already
+downloaded**, so it boots without the Ubisoft Connect launcher running. They do
+**not** bypass any cryptographic license check and do nothing for titles you
+don't own. `optima-cli launch` auto-detects which shim a game needs from its exe
+imports and deploys the matching one:
 
-The shim is built from **[Re0xCat/uplay-r1-loader](https://github.com/Re0xCat/uplay-r1-loader)**
-(an open Uplay R1 emulator). The prebuilt DLLs live in `drm/uplay_r1/` and are
-embedded into `optima-cli` at compile time so a normal `cargo build` works
-without a Windows cross-toolchain. To rebuild them yourself and verify:
+- **Uplay R1** (`uplay_r1_loader.dll`, flat `UPLAY_*` C API) — e.g. AC4 Black Flag.
+  Built from **[Re0xCat/uplay-r1-loader](https://github.com/Re0xCat/uplay-r1-loader)**;
+  prebuilt DLLs in `drm/uplay_r1/`. Games that import `upc_r1_loader.dll` (same API)
+  get a copy of this one under that name.
+- **Orbit R2** (`ubiorbitapi_r2_loader.dll`, the C++ `OrbitClient` class) — e.g.
+  Assassin's Creed III. Vendored (with fixes) in `drm/orbit_r2/source/`, prebuilt
+  DLL in `drm/orbit_r2/`. Based on
+  [Re0xCat/ubiorbitapi-r2-loader](https://github.com/Re0xCat/ubiorbitapi-r2-loader),
+  with a corrected `__thiscall` invocation (the listener callbacks were reaching
+  the game with a null `this`) and asynchronous callback delivery from `Update()`.
+- **EAX** (`eax.dll`) — classic titles (Beyond Good & Evil, Splinter Cell) demand
+  Creative EAX, which doesn't exist under Proton. Our shim (source in `drm/eax/`)
+  forwards `EAXDirectSoundCreate8` to plain DirectSound so the check passes.
+
+All shims are embedded into `optima-cli` at compile time (via `include_bytes!`),
+so a normal `cargo build` works without a Windows cross-toolchain. To rebuild and
+verify them yourself:
 
 ```bash
-git clone https://github.com/Re0xCat/uplay-r1-loader
-cd uplay-r1-loader
-cargo build --release --target i686-pc-windows-gnu     # -> loader.dll  (32-bit)
-cargo build --release --target x86_64-pc-windows-gnu   # -> loader.dll  (64-bit)
-# copy the two loader.dll builds over drm/uplay_r1/uplay_r1_loader{,64}.dll
+# Uplay R1 (mingw):
+git clone https://github.com/Re0xCat/uplay-r1-loader && cd uplay-r1-loader
+cargo build --release --target i686-pc-windows-gnu     # -> loader.dll (32-bit)
+cargo build --release --target x86_64-pc-windows-gnu   # -> loader.dll (64-bit)
+# copy over drm/uplay_r1/uplay_r1_loader{,64}.dll
+
+# Orbit R2 (MSVC target via cargo-xwin — the C++ ABI needs MSVC):
+cargo install cargo-xwin
+cd drm/orbit_r2/source
+XWIN_ARCH="x86,x86_64" cargo xwin build --release --target i686-pc-windows-msvc
+# copy target/i686-pc-windows-msvc/release/ubiorbitapi_r2_loader.dll to drm/orbit_r2/
+
+# EAX (mingw):
+cd drm/eax && i686-w64-mingw32-gcc -shared -O2 -o eax.dll eax_stub.c eax.def -static-libgcc
 ```
 
 ## Building
@@ -106,6 +129,7 @@ optima-cli login --local              # sign in (browser, one time)
 optima-cli list-games                 # your owned, installable games
 optima-cli install <product_id>       # download from Ubisoft's CDN
 optima-cli launch <product_id>        # run under Proton
+optima-cli settings <product_id>      # run a game's settings/config app (resolution, etc.)
 optima-cli profile --email … --username … --password …   # local Uplay profile
 optima-cli whoami                     # show + verify the stored session
 ```
@@ -125,6 +149,8 @@ gives you a Game-Mode UI to log in, install, and launch — no desktop mode.
   protocol reversing (the basis for `proto/`)
 - [Re0xCat/uplay-r1-loader](https://github.com/Re0xCat/uplay-r1-loader) — the
   Uplay R1 compatibility shim
+- [Re0xCat/ubiorbitapi-r2-loader](https://github.com/Re0xCat/ubiorbitapi-r2-loader)
+  — the basis for the Orbit R2 shim (vendored + fixed in `drm/orbit_r2/source/`)
 - [Open-Wine-Components/umu-launcher](https://github.com/Open-Wine-Components/umu-launcher)
   — the Proton runtime launcher
 

@@ -94,6 +94,13 @@ pub struct LaunchCache {
     pub exe_rel: String,
     /// Human-readable game name (for log lines).
     pub name: String,
+    /// The game's own install-path registry location, verbatim from the product
+    /// config's `working_directory.register` (e.g.
+    /// `HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Beyond Good & Evil\Install path`). Old
+    /// settings apps / games read this to confirm the game is "properly installed"
+    /// and to find their data. Set at launch so they don't bail. Empty if unknown.
+    #[serde(default)]
+    pub install_reg: String,
 }
 
 /// The account identity the Uplay R1 emu presents to games. Browser/ticket login

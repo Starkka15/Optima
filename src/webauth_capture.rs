@@ -131,7 +131,7 @@ pub async fn run() -> Result<()> {
     println!("A browser tab opened to the Optima sign-in form ({start}).");
     println!("If it didn't open, paste that URL into a browser (the localhost.ubisoft.com name matters).");
     println!("First time: the browser warns about a self-signed certificate — click Advanced → proceed. It's your own local server.");
-    println!("Enter your Ubisoft email + password, then authorize with Ubisoft — Optima does the rest.");
+    println!("Step 1 saves your account locally (for your games); Step 2 is the real Ubisoft sign-in.");
 
     let mut ticket: Option<String> = None;
     loop {
@@ -346,7 +346,9 @@ const FORM_PAGE: &str = r#"<!doctype html><html><head><meta charset=utf-8>
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#15151a;color:#ececf1;
 display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;padding:1rem}
 .card{background:#20202a;padding:2rem;border-radius:14px;width:360px;box-shadow:0 10px 40px rgba(0,0,0,.5);border:1px solid #2e2e3a}
+.step{font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:#e8622c;font-weight:600;margin:0 0 .5rem}
 h1{font-size:1.25rem;margin:0 0 .4rem} p{color:#9a9aa8;font-size:.85rem;line-height:1.4;margin:0 0 1.2rem}
+p strong{color:#ececf1}
 label{display:block;font-size:.78rem;letter-spacing:.02em;text-transform:uppercase;margin:.9rem 0 .3rem;color:#b9b9c6}
 input{width:100%;padding:.6rem .7rem;border:1px solid #363644;border-radius:8px;background:#15151a;color:#ececf1;font-size:.95rem}
 input:focus{outline:none;border-color:#e8622c}
@@ -363,18 +365,20 @@ background:#15151a;color:#ececf1;font:12px ui-monospace,monospace}
 </style></head><body>
 <div class=card>
 <form id=stage1 onsubmit="go(event)">
-<h1>Sign in to Ubisoft</h1>
-<p>Optima stores your email &amp; password locally to present your account to games, then gets a session ticket from Ubisoft. Your username fills in automatically.</p>
+<div class=step>Step 1 of 2 · Saved on this device</div>
+<h1>Save your account for games</h1>
+<p>This does <strong>not</strong> sign you in yet. Optima stores these locally so your games can present your Uplay account offline. <strong>You'll sign in to Ubisoft for real on the next step.</strong></p>
 <label for=email>Ubisoft email</label>
 <input id=email name=email type=email autocomplete=username autofocus required>
 <label for=password>Password</label>
 <input id=password name=password type=password autocomplete=current-password required>
-<button id=btn type=submit>Continue &rarr;</button>
-<div class=note>Password is stored locally only — never sent anywhere but the game.</div>
+<button id=btn type=submit>Save &amp; continue to Ubisoft sign-in &rarr;</button>
+<div class=note>Stored locally only — never sent anywhere but your own games.</div>
 </form>
 <div id=stage2 style="display:none">
-<h1>Authorizing…</h1>
-<p>Getting your Ubisoft session ticket. If prompted, sign in — the window closes itself.</p>
+<div class=step>Step 2 of 2 · Sign in to Ubisoft</div>
+<h1>Sign in to Ubisoft</h1>
+<p>Now authenticate with Ubisoft to get your session ticket. If a login window doesn't appear, use the button below. It closes itself when done.</p>
 <button id=signin class=alt style="display:none" onclick="popupLogin()">Sign in to Ubisoft</button>
 <div id=log></div>
 <details><summary>Having trouble? Paste a ticket manually</summary>

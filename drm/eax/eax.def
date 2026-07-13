@@ -1,0 +1,4 @@
+LIBRARY eax
+EXPORTS
+    EAXDirectSoundCreate8 @1
+    EAXDirectSoundCreate @2

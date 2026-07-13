@@ -18,6 +18,92 @@ use std::path::{Path, PathBuf};
 const LOADER64: &[u8] = include_bytes!("../drm/uplay_r1/uplay_r1_loader64.dll");
 const LOADER32: &[u8] = include_bytes!("../drm/uplay_r1/uplay_r1_loader.dll");
 
+/// Our reimplemented Orbit R2 loader (32-bit), built from Re0xCat's open
+/// `ubiorbitapi_r2_loader` (the C++ `OrbitClient` ABI). Older titles like
+/// Assassin's Creed III import `ubiorbitapi_r2_loader.dll` (the C++ Orbit client)
+/// *and* `upc_r1_loader.dll` (flat UPLAY_* C API) instead of `uplay_r1_loader.dll`.
+/// Without our own `ubiorbitapi_r2_loader.dll` the game bails with "Unable to find
+/// Ubisoft Game Launcher". `upc_r1_loader.dll` exports the same 11 UPLAY_* symbols
+/// our uplay R1 loader already provides, so we satisfy it by deploying a copy of
+/// LOADER32 under that name.
+const ORBIT_R2_32: &[u8] = include_bytes!("../drm/orbit_r2/ubiorbitapi_r2_loader.dll");
+
+/// EAX shim (`drm/eax/eax.dll`, 32-bit). Old titles (Beyond Good & Evil's settings
+/// app, Splinter Cell) demand Creative EAX; it doesn't exist under Proton, so they
+/// fail with "EAX not properly installed". Our shim forwards EAXDirectSoundCreate8
+/// to plain DirectSound (Wine implements that) so the check passes. Deployed
+/// next to any exe that references EAX (`deploy_eax`).
+const EAX_STUB_32: &[u8] = include_bytes!("../drm/eax/eax.dll");
+
+/// Does this exe require Creative EAX? Both statically-linked (imports EAX.DLL) and
+/// dynamic (LoadLibrary "eax.dll" + GetProcAddress) users carry the literal
+/// `EAXDirectSound...` symbol name in the binary, so a byte scan catches both.
+pub fn needs_eax(exe: &Path) -> bool {
+    match std::fs::read(exe) {
+        Ok(bytes) => find_bytes(&bytes, b"EAXDirectSound").is_some(),
+        Err(_) => false,
+    }
+}
+
+/// Drop our EAX shim next to the exe if the exe needs EAX and no working `eax.dll`
+/// is already ours. Backs up any real (Creative) eax.dll once — under Proton it
+/// can't work anyway, but the move stays reversible.
+pub fn deploy_eax(dir: &Path, exe: &Path) -> Result<()> {
+    if !needs_eax(exe) {
+        return Ok(());
+    }
+    let dst = dir.join("eax.dll");
+    if dst.exists() {
+        let bak = dir.join("eax.dll.orig");
+        if !bak.exists() && std::fs::metadata(&dst).map(|m| m.len() as usize).ok() != Some(EAX_STUB_32.len()) {
+            std::fs::rename(&dst, &bak).with_context(|| format!("backing up {}", dst.display()))?;
+        }
+    }
+    std::fs::write(&dst, EAX_STUB_32).with_context(|| format!("writing {}", dst.display()))?;
+    println!("[launch] deployed EAX shim → {}", dst.display());
+    Ok(())
+}
+
+/// Which Ubisoft DRM generation a game's exe links against — decides which loader
+/// DLLs and config files we deploy. Detected by scanning the exe's imports.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Drm {
+    /// Imports `uplay_r1_loader.dll` (flat UPLAY_* C API). AC4, most R1 SP titles.
+    UplayR1,
+    /// Imports `ubiorbitapi_r2_loader.dll` (C++ OrbitClient) + `upc_r1_loader.dll`.
+    /// AC3 and other early-Orbit AnvilNext titles.
+    OrbitR2,
+}
+
+/// Detect the DRM generation by scanning the game exe for the loader DLL name it
+/// imports. Both names appear as plain ASCII in the PE import directory, so a byte
+/// scan is enough and needs no PE parser. Orbit R2 is checked first because those
+/// titles import *both* names.
+pub fn detect_drm(exe: &Path) -> Drm {
+    match std::fs::read(exe) {
+        Ok(bytes) => {
+            if find_bytes(&bytes, b"ubiorbitapi_r2_loader").is_some() {
+                Drm::OrbitR2
+            } else {
+                Drm::UplayR1
+            }
+        }
+        // Unreadable exe: assume the common case; run_game will surface a clearer
+        // error if the path is actually wrong.
+        Err(_) => Drm::UplayR1,
+    }
+}
+
+/// Case-insensitive substring search over raw bytes (DLL import names are ASCII).
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    let lower = |b: u8| b.to_ascii_lowercase();
+    (0..=hay.len() - needle.len())
+        .find(|&i| hay[i..i + needle.len()].iter().zip(needle).all(|(a, b)| lower(*a) == lower(*b)))
+}
+
 /// Everything the reimplemented loader needs to present a logged-in, owning user.
 pub struct LaunchAccount {
     pub user_id: String,   // Ubisoft account UUID (profile id)
@@ -81,7 +167,7 @@ pub fn write_uplay_toml(game_dir: &Path, acct: &LaunchAccount, name: &str) -> Re
          InstallHooks = false\n\
          \n\
          [Uplay.Log]\n\
-         Write = false\n\
+         Write = {log}\n\
          Path = \"Uplay.log\"\n\
          \n\
          [Uplay.Profile]\n\
@@ -92,6 +178,7 @@ pub fn write_uplay_toml(game_dir: &Path, acct: &LaunchAccount, name: &str) -> Re
          Ticket = \"{ticket}\"\n",
         name = toml_escape(name),
         language = toml_escape(&acct.language),
+        log = std::env::var_os("OPTIMA_LOG").is_some(),
         account_id = toml_escape(&acct.user_id),
         email = toml_escape(&acct.email),
         username = toml_escape(&acct.username),
@@ -103,15 +190,64 @@ pub fn write_uplay_toml(game_dir: &Path, acct: &LaunchAccount, name: &str) -> Re
     Ok(())
 }
 
+/// Write `Orbit.toml` — the config our Orbit R2 emu (`ubiorbitapi_r2_loader.dll`)
+/// reads from the game's working dir at load time (`env::current_dir()/Orbit.toml`).
+/// The struct is `[Orbit] Name/ProductId/Saves/CdKeys`, `[Orbit.Log] Write/Path`,
+/// `[Orbit.Profile] AccountId/Username/Password`. `Saves` is a folder for local
+/// saves; we point it at `<game_dir>/Saves` and create it so any early savegame
+/// enumeration doesn't fail. Ownership + identity are the real account values.
+pub fn write_orbit_toml(game_dir: &Path, acct: &LaunchAccount, name: &str) -> Result<()> {
+    // Keep the saves dir path RELATIVE: the emu runs inside Wine and resolves it
+    // against the game's working dir. An absolute Linux path ("/home/...") would be
+    // misread as a Windows path under Wine and fail. "Saves" → <game_dir>/Saves in
+    // both the Linux and Wine views.
+    std::fs::create_dir_all(game_dir.join("Saves")).ok();
+    let toml = format!(
+        "[Orbit]\n\
+         Name = \"{name}\"\n\
+         ProductId = {product_id}\n\
+         Saves = \"Saves\"\n\
+         CdKeys = [\"\"]\n\
+         \n\
+         [Orbit.Log]\n\
+         Write = {log}\n\
+         Path = \"Orbit.log\"\n\
+         \n\
+         [Orbit.Profile]\n\
+         AccountId = \"{account_id}\"\n\
+         Username = \"{username}\"\n\
+         Password = \"{password}\"\n",
+        name = toml_escape(name),
+        product_id = acct.app_id,
+        log = std::env::var_os("OPTIMA_LOG").is_some(),
+        account_id = toml_escape(&acct.user_id),
+        username = toml_escape(&acct.username),
+        password = toml_escape(&acct.password),
+    );
+    let path = game_dir.join("Orbit.toml");
+    std::fs::write(&path, toml).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
 /// Drop our reimplemented loaders into the game folder, backing up any real ones
-/// the game shipped (so the move is reversible).
-pub fn deploy_loaders(game_dir: &Path) -> Result<()> {
-    for (name, bytes) in [
+/// the game shipped (so the move is reversible). `drm` selects which loaders the
+/// title actually imports: R1 titles only need the flat UPLAY_* loader; Orbit R2
+/// titles (AC3) additionally need our C++ `ubiorbitapi_r2_loader.dll` and a
+/// `upc_r1_loader.dll` (same UPLAY_* API — satisfied by a copy of our R1 loader).
+pub fn deploy_loaders(game_dir: &Path, drm: Drm) -> Result<()> {
+    let mut loaders: Vec<(&str, &[u8])> = vec![
         ("uplay_r1_loader64.dll", LOADER64),
         ("uplay_r1_loader.dll", LOADER32),
         // Old Orbit-era titles import this name; our 64-bit DLL satisfies it too.
         ("ubiorbitapi_r1_loader64.dll", LOADER64),
-    ] {
+    ];
+    if drm == Drm::OrbitR2 {
+        // The C++ OrbitClient DLL (the "Ubisoft Game Launcher" the game looks for)
+        // and the flat-C UPC loader (same 11 UPLAY_* exports as our R1 loader).
+        loaders.push(("ubiorbitapi_r2_loader.dll", ORBIT_R2_32));
+        loaders.push(("upc_r1_loader.dll", LOADER32));
+    }
+    for (name, bytes) in loaders {
         let dst = game_dir.join(name);
         // Back up a real, non-Optima DLL exactly once.
         if dst.exists() {
@@ -131,7 +267,10 @@ pub fn deploy_loaders(game_dir: &Path) -> Result<()> {
 /// match against the embedded bytes.
 fn is_our_loader(path: &Path) -> bool {
     match std::fs::metadata(path) {
-        Ok(m) => m.len() as usize == LOADER64.len() || m.len() as usize == LOADER32.len(),
+        Ok(m) => {
+            let n = m.len() as usize;
+            n == LOADER64.len() || n == LOADER32.len() || n == ORBIT_R2_32.len()
+        }
         Err(_) => false,
     }
 }
@@ -209,36 +348,58 @@ fn ensure_registry(
     prefix: &Path,
     product_id: u32,
     game_dir: &Path,
+    install_reg: Option<&str>,
 ) -> Result<()> {
-    let marker = prefix.join(format!(".optima-reg-{product_id}"));
-    if marker.exists() {
-        return Ok(());
-    }
     let win = format!("{}\\", wine_path(game_dir));
-    let keys = [
-        (
-            format!("HKLM\\SOFTWARE\\Ubisoft\\Launcher\\Installs\\{product_id}"),
-            "InstallDir",
-            win.clone(),
-        ),
-        (
-            "HKLM\\SOFTWARE\\Ubisoft\\Launcher".to_string(),
-            "InstallDir",
-            win.clone(),
-        ),
-    ];
-    for (key, val, data) in keys {
+
+    // The Ubisoft Launcher install keys never change → set once per prefix.
+    let launcher_marker = prefix.join(format!(".optima-reg3-{product_id}"));
+    if !launcher_marker.exists() {
+        reg_add_both(umu, proton, prefix,
+            &format!("HKLM\\SOFTWARE\\Ubisoft\\Launcher\\Installs\\{product_id}"), "InstallDir", &win);
+        reg_add_both(umu, proton, prefix,
+            "HKLM\\SOFTWARE\\Ubisoft\\Launcher", "InstallDir", &win);
+        std::fs::write(&launcher_marker, "").ok();
+    }
+
+    // The game's OWN install-path key from the product config (e.g. BG&E's
+    // `HKLM\SOFTWARE\Ubisoft\Beyond Good & Evil\Install path`). Old settings apps /
+    // games read it to confirm the game is installed and to find their data;
+    // without it BG&E's SettingsApplication bails "not properly installed". This is
+    // guarded by its OWN marker, written only once we ACTUALLY have the key — the
+    // config fetch that yields it can flake/be offline, so we must keep retrying
+    // across launches until it's set rather than marking it done prematurely.
+    let gamekey_marker = prefix.join(format!(".optima-gamekey-{product_id}"));
+    if !gamekey_marker.exists() {
+        if let Some((key, value)) = install_reg.and_then(parse_register) {
+            println!("[launch] setting game install key: {key}\\{value}");
+            reg_add_both(umu, proton, prefix, &key, &value, &win);
+            std::fs::write(&gamekey_marker, "").ok();
+        }
+    }
+    Ok(())
+}
+
+/// `reg add` a value to BOTH the native and the Wow6432Node (32-bit view) path, so
+/// it's visible regardless of the reading process's bitness. These classic titles
+/// are 32-bit and their HKLM\SOFTWARE reads redirect to Wow6432Node.
+fn reg_add_both(umu: &Path, proton: &Option<PathBuf>, prefix: &Path, key: &str, value: &str, data: &str) {
+    let mut targets = vec![key.to_string()];
+    if let Some(w) = wow64_variant(key) {
+        targets.push(w);
+    }
+    for k in targets {
         let mut cmd = std::process::Command::new("python3");
         cmd.arg(umu)
             .arg("reg")
             .arg("add")
-            .arg(&key)
+            .arg(&k)
             .arg("/v")
-            .arg(val)
+            .arg(value)
             .arg("/t")
             .arg("REG_SZ")
             .arg("/d")
-            .arg(&data)
+            .arg(data)
             .arg("/f")
             .env("WINEPREFIX", prefix)
             .env("GAMEID", "0")
@@ -248,8 +409,42 @@ fn ensure_registry(
         }
         let _ = cmd.status();
     }
-    std::fs::write(&marker, "").ok();
-    Ok(())
+}
+
+/// Produce the WOW64 (32-bit view) variant of an HKLM\SOFTWARE key by inserting
+/// `Wow6432Node` after `SOFTWARE`, so a value written from 64-bit `reg` is visible
+/// to 32-bit apps (whose SOFTWARE reads are redirected there). Returns None if the
+/// key isn't an HKLM\SOFTWARE key or already targets Wow6432Node.
+fn wow64_variant(key: &str) -> Option<String> {
+    let upper = key.to_uppercase();
+    if upper.contains("WOW6432NODE") {
+        return None;
+    }
+    let prefix = "HKLM\\SOFTWARE\\";
+    if upper.starts_with("HKLM\\SOFTWARE\\") {
+        let rest = &key[prefix.len()..];
+        Some(format!("HKLM\\SOFTWARE\\Wow6432Node\\{rest}"))
+    } else {
+        None
+    }
+}
+
+/// Split a Ubisoft config `register` string into (key, value_name). The last
+/// backslash-separated segment is the value name; the rest is the key. Normalizes
+/// the full hive names to the short forms `reg add` expects.
+fn parse_register(reg: &str) -> Option<(String, String)> {
+    let reg = reg
+        .replace("HKEY_LOCAL_MACHINE", "HKLM")
+        .replace("HKEY_CURRENT_USER", "HKCU")
+        .replace("HKEY_CLASSES_ROOT", "HKCR");
+    let idx = reg.rfind('\\')?;
+    let key = reg[..idx].trim().to_string();
+    let value = reg[idx + 1..].trim().to_string();
+    if key.is_empty() || value.is_empty() {
+        None
+    } else {
+        Some((key, value))
+    }
 }
 
 /// Import any `.reg` files the game ships (its installer normally would) into the
@@ -307,15 +502,23 @@ pub fn run_game(
     prefix: &Path,
     product_id: u32,
     args: &[String],
+    install_reg: Option<&str>,
 ) -> Result<()> {
     let (umu, proton) = resolve_runtime()?;
     std::fs::create_dir_all(prefix).ok();
+
+    // Run with CWD = the exe's own directory. Unreal-engine titles (Splinter Cell
+    // Chaos Theory) live in a System/ subdir and resolve their data via paths
+    // relative to it; running from the install root breaks them. For root-level
+    // exes this is identical to game_dir. game_dir is still the install ROOT, used
+    // below for the Ubisoft install registry keys.
+    let cwd = exe.parent().unwrap_or(game_dir);
 
     let mut cmd = std::process::Command::new("python3");
     cmd.arg(&umu)
         .arg(exe)
         .args(args)
-        .current_dir(game_dir)
+        .current_dir(cwd)
         .env("WINEPREFIX", prefix)
         .env("GAMEID", "0")
         .env("STORE", "none");
@@ -378,7 +581,7 @@ pub fn run_game(
     if std::env::var_os("OPTIMA_NO_RUN").is_some() {
         println!(
             "[launch] would run: cd {} && WINEPREFIX={} GAMEID=0 STORE=none{} python3 {} {} {}",
-            game_dir.display(),
+            cwd.display(),
             prefix.display(),
             proton
                 .as_ref()
@@ -392,7 +595,7 @@ pub fn run_game(
     }
 
     // Point the Ubisoft install registry at the game folder first.
-    ensure_registry(&umu, &proton, prefix, product_id, game_dir)?;
+    ensure_registry(&umu, &proton, prefix, product_id, game_dir, install_reg)?;
     // Old Ubisoft installers import shipped .reg seeds (e.g. BG&E's
     // support/settings.reg holds the SettingsApplication.INI keys the game
     // demands — without them it errors "Application settings not correctly

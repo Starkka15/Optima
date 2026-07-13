@@ -80,6 +80,22 @@ enum Cmd {
         #[arg(long)]
         exe: Option<String>,
     },
+    /// Launch a game's bundled settings/config application (e.g. Beyond Good &
+    /// Evil's SettingsApplication.exe) in the same Proton prefix, so you can change
+    /// resolution/graphics. Many old titles boot at a tiny default (BG&E = 640x480)
+    /// with no in-game video options — this is the only way to fix it.
+    Settings {
+        /// Product id of the game (see `list-games`).
+        product_id: u32,
+        /// Install directory (default: ~/Games/optima/<product_id>).
+        #[arg(long)]
+        path: Option<String>,
+        /// Settings executable, relative to the install dir. If omitted, it's
+        /// auto-detected (the config's `internal_name: Settings` exe, else a disk
+        /// scan for *settings*/*config*.exe).
+        #[arg(long)]
+        exe: Option<String>,
+    },
     /// Dump the raw product `configuration` YAML for an owned product id
     /// (diagnostic: reveals real title, launch exe, uplay app id, DRM info).
     Config {
@@ -118,6 +134,7 @@ async fn main() -> Result<()> {
         Cmd::ListGames { json } => do_list_games(json).await,
         Cmd::Install { product_id, path } => do_install(product_id, path).await,
         Cmd::Launch { product_id, path, exe } => do_launch(product_id, path, exe).await,
+        Cmd::Settings { product_id, path, exe } => do_settings(product_id, path, exe).await,
         Cmd::Config { product_id } => do_config(product_id).await,
         Cmd::Profile { email, username, password } => do_profile(email, username, password),
         Cmd::Whoami => do_whoami().await,
@@ -523,10 +540,32 @@ async fn do_launch(product_id: u32, path: Option<String>, exe: Option<String>) -
 
     // An explicit --exe always wins over the cached path.
     let exe_rel = exe.unwrap_or_else(|| cache.exe_rel.clone());
-    let exe_path = dir.join(exe_rel.replace('\\', std::path::MAIN_SEPARATOR_STR));
+    let mut exe_path = dir.join(exe_rel.replace('\\', std::path::MAIN_SEPARATOR_STR));
     if !exe_path.exists() {
-        anyhow::bail!("executable {} not found (install incomplete?)", exe_path.display());
+        // The product config's `executables.relative` sometimes omits the subdir
+        // the files actually land in (e.g. Splinter Cell Chaos Theory's exe is at
+        // System/splintercell3.exe but the config just says "splintercell3.exe").
+        // Fall back to searching the install dir for the exe basename.
+        let base = std::path::Path::new(&exe_rel)
+            .file_name()
+            .map(|f| f.to_owned())
+            .unwrap_or_default();
+        match find_exe_in(&dir, &base) {
+            Some(found) => {
+                println!("[launch] exe not at {}; found it at {}", exe_path.display(), found.display());
+                exe_path = found;
+            }
+            None => anyhow::bail!(
+                "executable {} not found (install incomplete?)",
+                exe_path.display()
+            ),
+        }
     }
+    // Unreal-style games (Chaos Theory) live in a System/ subdir and resolve their
+    // data via paths relative to the exe's own directory, so the game must run with
+    // its CWD = the exe folder and load its folder-local DLLs from there. For
+    // root-level exes (AC3/AC4) this is just the install root — no change.
+    let run_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| dir.clone());
 
     // The player identity the emu presents. Precedence: env override →
     // stored profile (from `optima-cli profile set` / the extension form) →
@@ -563,12 +602,29 @@ async fn do_launch(product_id: u32, path: Option<String>, exe: Option<String>) -
         language: cache.language.clone(),
     };
 
-    println!("[launch] preparing {}: writing Uplay.toml + deploying R1 loader...", cache.name);
+    // Which Ubisoft DRM does this exe link against? AC4 & most SP titles import
+    // uplay_r1_loader.dll (flat UPLAY_*). AC3 & other early-Orbit AnvilNext titles
+    // import ubiorbitapi_r2_loader.dll (C++ OrbitClient) + upc_r1_loader.dll — a
+    // different emu. Detect from the exe so we deploy the matching loaders.
+    let drm = launch::detect_drm(&exe_path);
+    println!(
+        "[launch] preparing {}: DRM={:?}, writing config + deploying loaders...",
+        cache.name, drm
+    );
     // Our complete emu reads Uplay.toml; keep the legacy Uplay.ini too (harmless,
     // ignored by the new loader) so a fallback minimal loader would still work.
-    launch::write_uplay_toml(&dir, &acct, &cache.name)?;
-    launch::write_uplay_ini(&dir, &acct)?;
-    launch::deploy_loaders(&dir)?;
+    // upc_r1_loader.dll (Orbit R2 titles) is our R1 loader and reads Uplay.toml too.
+    // Everything goes next to the exe (run_dir) so the game loads its folder-local
+    // DLLs and reads the config from its own working dir.
+    launch::write_uplay_toml(&run_dir, &acct, &cache.name)?;
+    launch::write_uplay_ini(&run_dir, &acct)?;
+    // Orbit R2 titles additionally need Orbit.toml for ubiorbitapi_r2_loader.dll.
+    if drm == launch::Drm::OrbitR2 {
+        launch::write_orbit_toml(&run_dir, &acct, &cache.name)?;
+    }
+    launch::deploy_loaders(&run_dir, drm)?;
+    // Old titles that demand Creative EAX (BG&E, Splinter Cell) — drop our shim.
+    launch::deploy_eax(&run_dir, &exe_path)?;
 
     let prefix = config::data_dir()?.join("prefix");
     // `-offline` is a title-SPECIFIC Uplay SP variant (AC4 accepts it) — but many
@@ -583,7 +639,183 @@ async fn do_launch(product_id: u32, path: Option<String>, exe: Option<String>) -
     } else {
         vec![]
     };
-    launch::run_game(&dir, &exe_path, &prefix, product_id, &args)
+    let install_reg = (!cache.install_reg.is_empty()).then(|| cache.install_reg.clone());
+    launch::run_game(&dir, &exe_path, &prefix, product_id, &args, install_reg.as_deref())
+}
+
+/// Launch a game's settings/config application in the same Proton prefix so the
+/// player can change resolution/graphics (many old titles boot tiny with no
+/// in-game video menu). No account/DRM setup needed — the settings app just reads
+/// and writes the game's registry/ini in the prefix, which the game then reads.
+async fn do_settings(product_id: u32, path: Option<String>, exe: Option<String>) -> Result<()> {
+    let dir = match &path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => dirs::home_dir()
+            .unwrap_or_default()
+            .join("Games/optima")
+            .join(product_id.to_string()),
+    };
+    if !dir.exists() {
+        anyhow::bail!(
+            "install dir {} does not exist — run `optima-cli install {product_id}` first",
+            dir.display()
+        );
+    }
+
+    // Fetch the product config once (best-effort, offline-tolerant) — it names both
+    // the settings exe and the game's install-path registry key. If the fetch
+    // flakes (it hits the network), fall back to the install key cached by a prior
+    // launch so the settings app still gets its "properly installed" registry key.
+    let cfg = resolve_product_config(product_id).await.ok();
+    let install_reg = cfg
+        .as_deref()
+        .and_then(install_register)
+        .or_else(|| {
+            config::load_launch_cache(product_id)
+                .ok()
+                .flatten()
+                .map(|c| c.install_reg)
+                .filter(|s| !s.is_empty())
+        });
+
+    // Resolve the settings exe: explicit --exe wins; else the config's
+    // `internal_name: Settings` exe; else a disk scan.
+    let settings_path = if let Some(rel) = exe {
+        let p = dir.join(rel.replace('\\', std::path::MAIN_SEPARATOR_STR));
+        if p.exists() {
+            Some(p)
+        } else {
+            find_exe_in(&dir, p.file_name().unwrap_or_default())
+        }
+    } else {
+        let from_config = cfg.as_deref().and_then(find_settings_exe).and_then(|rel| {
+            let base = std::path::Path::new(&rel).file_name()?.to_owned();
+            find_exe_in(&dir, &base)
+        });
+        from_config.or_else(|| find_settings_exe_on_disk(&dir))
+    };
+
+    let settings_path = settings_path.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no settings/config application found for product {product_id}. \
+             Pass one explicitly with --exe <relative\\path.exe> (look for a \
+             *Settings*.exe or *Config*.exe in {}).",
+            dir.display()
+        )
+    })?;
+
+    // The settings app itself needs the EAX shim (that's exactly what BG&E's
+    // SettingsApplication.exe demands). Deploy it next to the settings exe.
+    let settings_dir = settings_path.parent().unwrap_or(&dir);
+    launch::deploy_eax(settings_dir, &settings_path)?;
+
+    let prefix = config::data_dir()?.join("prefix");
+    println!("[settings] launching {} ...", settings_path.display());
+    // Reuse the game runner: it points the Ubisoft install registry (incl. the
+    // game's own install-path key, so the app doesn't bail "not properly
+    // installed") at the game, sets CWD to the exe's dir, and runs under the same
+    // prefix — so the settings app's writes land where the game reads them.
+    launch::run_game(&dir, &settings_path, &prefix, product_id, &[], install_reg.as_deref())
+}
+
+/// Fetch just the product `configuration` YAML for a product id (no launch cache).
+async fn resolve_product_config(product_id: u32) -> Result<String> {
+    let (mut demux, _ticket) = connect_demux().await?;
+    let games = demux.owned_games().await?;
+    let game = games
+        .iter()
+        .find(|g| g.product_id == product_id)
+        .ok_or_else(|| anyhow::anyhow!("product {product_id} not found"))?;
+    game.configuration
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no configuration for product {product_id}"))
+}
+
+/// Find the settings/config executable named in a product configuration — the
+/// entry whose sibling `internal_name`/description marks it as the Settings app.
+fn find_settings_exe(config: &str) -> Option<String> {
+    let v: serde_yaml::Value = serde_yaml::from_str(config).ok()?;
+    let mut found = None;
+    walk_for_settings(&v, &mut found);
+    found
+}
+
+fn walk_for_settings(v: &serde_yaml::Value, found: &mut Option<String>) {
+    if found.is_some() {
+        return;
+    }
+    match v {
+        serde_yaml::Value::Mapping(m) => {
+            // Does THIS mapping name an exe and mark itself as the settings app?
+            let rel = m
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("relative"))
+                .and_then(|(_, val)| val.as_str());
+            if let Some(rel) = rel {
+                if rel.to_lowercase().ends_with(".exe") {
+                    let is_settings = m.iter().any(|(k, val)| {
+                        let kn = k.as_str().unwrap_or("").to_lowercase();
+                        let vs = val.as_str().unwrap_or("").to_lowercase();
+                        (kn.contains("internal_name")
+                            || kn.contains("description")
+                            || kn == "name")
+                            && (vs.contains("setting") || vs.contains("config"))
+                    });
+                    if is_settings {
+                        *found = Some(rel.to_string());
+                        return;
+                    }
+                }
+            }
+            for (_, val) in m {
+                walk_for_settings(val, found);
+            }
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for item in seq {
+                walk_for_settings(item, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Fallback: scan the install dir for an exe that looks like a settings/config app
+/// (name contains "settings" or "config"), excluding installer/redistributable
+/// junk. Prefers the shallowest match.
+fn find_settings_exe_on_disk(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut matches: Vec<std::path::PathBuf> = Vec::new();
+    while let Some(d) = stack.pop() {
+        let rd = match std::fs::read_dir(&d) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if !name.ends_with(".exe") {
+                continue;
+            }
+            let looks_settings = name.contains("setting") || name.contains("config");
+            let is_junk = ["vcredist", "vc_redist", "dxsetup", "directx", "redist", "unins"]
+                .iter()
+                .any(|j| name.contains(j))
+                || p.to_string_lossy().to_lowercase().contains("support/installs");
+            if looks_settings && !is_junk {
+                matches.push(p);
+            }
+        }
+    }
+    matches.into_iter().min_by_key(|p| p.components().count())
 }
 
 /// Resolve the real account + ticket + launch exe from Ubisoft. Used to build
@@ -673,8 +905,47 @@ async fn resolve_launch_online(
         language: "en-US".to_string(),
         exe_rel,
         name,
+        install_reg: install_register(&config).unwrap_or_default(),
     })
 }
+
+/// Extract the game's own install-path registry location from the product config
+/// (`working_directory.register`) — old titles read it to confirm the game is
+/// installed and to find their data. Returns the raw registry string.
+fn install_register(config: &str) -> Option<String> {
+    let v: serde_yaml::Value = serde_yaml::from_str(config).ok()?;
+    let mut found = None;
+    walk_for_register(&v, &mut found);
+    found
+}
+
+fn walk_for_register(v: &serde_yaml::Value, found: &mut Option<String>) {
+    if found.is_some() {
+        return;
+    }
+    match v {
+        serde_yaml::Value::Mapping(m) => {
+            for (k, val) in m {
+                if k.as_str() == Some("register") {
+                    if let Some(s) = val.as_str() {
+                        if s.to_uppercase().contains("HKEY") {
+                            *found = Some(s.to_string());
+                            return;
+                        }
+                    }
+                }
+                walk_for_register(val, found);
+            }
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for item in seq {
+                walk_for_register(item, found);
+            }
+        }
+        _ => {}
+    }
+}
+
 
 /// The Ubisoft account email isn't in the `/me` response and the ticket is an
 /// encrypted JWE, so we can't recover it after login. Games don't validate it in
@@ -684,6 +955,33 @@ async fn resolve_launch_online(
 /// First option that is present and not blank (after trimming).
 fn first_nonempty<const N: usize>(opts: [Option<String>; N]) -> Option<String> {
     opts.into_iter().flatten().find(|s| !s.trim().is_empty())
+}
+
+/// Recursively search `root` for a file named `base` (the exe basename). Used when
+/// the product config's `executables.relative` path doesn't match the actual
+/// on-disk layout (e.g. the exe sits in a System/ subdir). Returns the first match.
+fn find_exe_in(root: &std::path::Path, base: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut matches: Vec<std::path::PathBuf> = Vec::new();
+    while let Some(d) = stack.pop() {
+        let rd = match std::fs::read_dir(&d) {
+            Ok(rd) => rd,
+            Err(_) => continue, // unreadable dir: skip, keep searching
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name() == Some(base) {
+                matches.push(p);
+            }
+        }
+    }
+    // Prefer the shallowest match — the main-game exe (e.g. System/foo.exe) over a
+    // deeper multiplayer copy (e.g. Versus/System/foo.exe).
+    matches
+        .into_iter()
+        .min_by_key(|p| p.components().count())
 }
 
 fn resolve_email(username: &str) -> String {
