@@ -163,15 +163,30 @@ fn toml_escape(s: &str) -> String {
 /// reads from the game's working dir at load time. `OfflineMode=true` keeps the
 /// game on local saves; `InstallHooks=false` because there is no original DLL to
 /// hook (we ARE the loader). Ownership + identity come from the real account we
-/// resolved. `Saves="<default>"` → `<game_dir>/Saves`.
+/// resolved. Saves go to a RELATIVE `Saves` dir we create up front — the `<default>`
+/// token gets misread as a Windows path under Wine (`<`/`>` are illegal path chars)
+/// and the loader hands the game a null save-store path, which WD1/AnvilNext then
+/// null-derefs during local-save init right after the offline-mode check. Same bug
+/// the Orbit R2 writer already dodges with a real relative dir.
 pub fn write_uplay_toml(game_dir: &Path, acct: &LaunchAccount, name: &str) -> Result<()> {
+    std::fs::create_dir_all(game_dir.join("Saves")).ok();
+    // Most single-player titles want offline (AC4's cloud-save thread null-derefs
+    // without a real backend). A few AnvilNext/Disrupt titles are the opposite —
+    // Watch_Dogs null-derefs inside Disrupt right after IsInOfflineMode returns
+    // true, i.e. its offline-gated init path expects online-session state our stub
+    // never established. OPTIMA_ONLINE=1 reports online so those follow the
+    // connected code path instead. Ownership is unaffected either way.
+    let offline = !matches!(
+        std::env::var("OPTIMA_ONLINE").ok().as_deref(),
+        Some("1") | Some("true")
+    );
     let toml = format!(
         "[Uplay]\n\
          Name = \"{name}\"\n\
-         Saves = \"<default>\"\n\
+         Saves = \"Saves\"\n\
          CdKeys = [\"\"]\n\
          Language = \"{language}\"\n\
-         OfflineMode = true\n\
+         OfflineMode = {offline}\n\
          InstallHooks = false\n\
          \n\
          [Uplay.Log]\n\
