@@ -28,6 +28,14 @@ const LOADER32: &[u8] = include_bytes!("../drm/uplay_r1/uplay_r1_loader.dll");
 /// LOADER32 under that name.
 const ORBIT_R2_32: &[u8] = include_bytes!("../drm/orbit_r2/ubiorbitapi_r2_loader.dll");
 
+/// Our self-signed code-signing cert (public, DER). Some titles (Watch_Dogs)
+/// anti-tamper-verify the Authenticode signature of the folder-local
+/// `uplay_r1_loader64.dll`; our shims are signed with this cert (subject mimics
+/// Ubisoft's) and it's imported into the prefix's trusted Root store at launch so
+/// `WinVerifyTrust` chains OK. Only ever trusted inside the game's throwaway
+/// prefix — it grants no real-world trust.
+const SIGNING_CERT: &[u8] = include_bytes!("../drm/signing/optima-signing.cer");
+
 /// EAX shim (`drm/eax/eax.dll`, 32-bit). Old titles (Beyond Good & Evil's settings
 /// app, Splinter Cell) demand Creative EAX; it doesn't exist under Proton, so they
 /// fail with "EAX not properly installed". Our shim forwards EAXDirectSoundCreate8
@@ -331,6 +339,24 @@ fn which(bin: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(p))
 }
 
+/// The working directory a game should run from. Ubisoft titles expect the install
+/// ROOT (their config's `working_directory` points at the install dir). Unreal
+/// titles (Splinter Cell Chaos Theory) keep their exe in a `System/` subdir and
+/// resolve data relative to it, so those run from `System/`.
+pub fn working_dir(install_root: &Path, exe: &Path) -> PathBuf {
+    if let Some(parent) = exe.parent() {
+        if parent
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case("System"))
+            .unwrap_or(false)
+        {
+            return parent.to_path_buf();
+        }
+    }
+    install_root.to_path_buf()
+}
+
 /// Convert a Linux path to the Wine drive-Z view (`/foo/bar` → `Z:\foo\bar`).
 fn wine_path(p: &Path) -> String {
     let s = p.to_string_lossy().replace('/', "\\");
@@ -429,6 +455,40 @@ fn wow64_variant(key: &str) -> Option<String> {
     }
 }
 
+/// Import our code-signing cert into the prefix's trusted Root store, so games
+/// that Authenticode-verify the folder-local loader DLL (e.g. Watch_Dogs) accept
+/// our signed shims. Marker-guarded (one Proton spin-up per prefix). Best-effort.
+fn ensure_cert_trust(umu: &Path, proton: &Option<PathBuf>, prefix: &Path) {
+    let marker = prefix.join(".optima-cert");
+    if marker.exists() {
+        return;
+    }
+    let cer = prefix.join("optima-signing.cer");
+    if std::fs::write(&cer, SIGNING_CERT).is_err() {
+        return;
+    }
+    let win = wine_path(&cer);
+    println!("[launch] trusting Optima signing cert in prefix Root store");
+    // certutil.exe is a Wine builtin; run it through umu like `reg`.
+    for store in ["Root", "TrustedPublisher"] {
+        let mut cmd = std::process::Command::new("python3");
+        cmd.arg(umu)
+            .arg("certutil")
+            .arg("-addstore")
+            .arg("-f")
+            .arg(store)
+            .arg(&win)
+            .env("WINEPREFIX", prefix)
+            .env("GAMEID", "0")
+            .env("STORE", "none");
+        if let Some(p) = proton {
+            cmd.env("PROTONPATH", p);
+        }
+        let _ = cmd.status();
+    }
+    std::fs::write(&marker, "").ok();
+}
+
 /// Split a Ubisoft config `register` string into (key, value_name). The last
 /// backslash-separated segment is the value name; the rest is the key. Normalizes
 /// the full hive names to the short forms `reg add` expects.
@@ -507,18 +567,18 @@ pub fn run_game(
     let (umu, proton) = resolve_runtime()?;
     std::fs::create_dir_all(prefix).ok();
 
-    // Run with CWD = the exe's own directory. Unreal-engine titles (Splinter Cell
-    // Chaos Theory) live in a System/ subdir and resolve their data via paths
-    // relative to it; running from the install root breaks them. For root-level
-    // exes this is identical to game_dir. game_dir is still the install ROOT, used
-    // below for the Ubisoft install registry keys.
-    let cwd = exe.parent().unwrap_or(game_dir);
+    // Working directory: the install ROOT by default (what Ubisoft titles expect —
+    // e.g. Watch_Dogs' exe is in bin/ but it resolves data_win64/ etc. relative to
+    // the root, per its config working_directory=…\InstallDir). Unreal-engine
+    // titles (Splinter Cell Chaos Theory) are the exception: their exe lives in a
+    // System/ subdir and they resolve data relative to it, so those run from there.
+    let cwd = working_dir(game_dir, exe);
 
     let mut cmd = std::process::Command::new("python3");
     cmd.arg(&umu)
         .arg(exe)
         .args(args)
-        .current_dir(cwd)
+        .current_dir(&cwd)
         .env("WINEPREFIX", prefix)
         .env("GAMEID", "0")
         .env("STORE", "none");
@@ -595,6 +655,8 @@ pub fn run_game(
     }
 
     // Point the Ubisoft install registry at the game folder first.
+    // Trust our signing cert so anti-tamper signature checks on the shim pass.
+    ensure_cert_trust(&umu, &proton, prefix);
     ensure_registry(&umu, &proton, prefix, product_id, game_dir, install_reg)?;
     // Old Ubisoft installers import shipped .reg seeds (e.g. BG&E's
     // support/settings.reg holds the SettingsApplication.INI keys the game

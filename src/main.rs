@@ -569,11 +569,12 @@ async fn do_launch(product_id: u32, path: Option<String>, exe: Option<String>) -
             ),
         }
     }
-    // Unreal-style games (Chaos Theory) live in a System/ subdir and resolve their
-    // data via paths relative to the exe's own directory, so the game must run with
-    // its CWD = the exe folder and load its folder-local DLLs from there. For
-    // root-level exes (AC3/AC4) this is just the install root — no change.
+    // DLLs load from the exe's own directory (folder-local search). Configs
+    // (Uplay.toml etc.) are read by the emu from the CWD, which is the install root
+    // for Ubisoft titles (Watch_Dogs' exe is in bin/ but runs from root) and the
+    // System/ dir for Unreal titles. For root-level exes all three coincide.
     let run_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| dir.clone());
+    let cwd = launch::working_dir(&dir, &exe_path);
 
     // The player identity the emu presents. Precedence: env override →
     // stored profile (from `optima-cli profile set` / the extension form) →
@@ -624,12 +625,22 @@ async fn do_launch(product_id: u32, path: Option<String>, exe: Option<String>) -
     // upc_r1_loader.dll (Orbit R2 titles) is our R1 loader and reads Uplay.toml too.
     // Everything goes next to the exe (run_dir) so the game loads its folder-local
     // DLLs and reads the config from its own working dir.
-    launch::write_uplay_toml(&run_dir, &acct, &cache.name)?;
-    launch::write_uplay_ini(&run_dir, &acct)?;
-    // Orbit R2 titles additionally need Orbit.toml for ubiorbitapi_r2_loader.dll.
-    if drm == launch::Drm::OrbitR2 {
-        launch::write_orbit_toml(&run_dir, &acct, &cache.name)?;
+    // Write the emu configs to both the exe dir and the CWD (they differ only when
+    // the exe is in a subdir like bin/ — write both so the emu finds them whether
+    // it reads from its own dir or the working dir).
+    let mut config_dirs = vec![run_dir.clone()];
+    if cwd != run_dir {
+        config_dirs.push(cwd.clone());
     }
+    for cd in &config_dirs {
+        launch::write_uplay_toml(cd, &acct, &cache.name)?;
+        launch::write_uplay_ini(cd, &acct)?;
+        // Orbit R2 titles additionally need Orbit.toml for ubiorbitapi_r2_loader.dll.
+        if drm == launch::Drm::OrbitR2 {
+            launch::write_orbit_toml(cd, &acct, &cache.name)?;
+        }
+    }
+    // DLLs load folder-local — deploy them next to the exe.
     launch::deploy_loaders(&run_dir, drm)?;
     // Old titles that demand Creative EAX (BG&E, Splinter Cell) — drop our shim.
     launch::deploy_eax(&run_dir, &exe_path)?;
