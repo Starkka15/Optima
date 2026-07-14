@@ -43,6 +43,24 @@ fn hex_upper(bytes: &[u8]) -> String {
     s
 }
 
+/// How this product's slices are laid out on the CDN. Newer AnvilNext titles
+/// (AC4, Brawlhalla) sit under `slices_v3/<bucketchar>/<HASH>`; older ones
+/// (AC Unity — `chunks_version=None`) serve them FLAT at `slices/<HASH>`. We
+/// probe once per install and reuse the answer for every slice.
+#[derive(Clone, Copy, Debug)]
+enum SliceLayout {
+    V3Bucket,
+    Flat,
+}
+
+/// Build a slice CDN path (relative to the product's download root) for a hash.
+fn slice_path(layout: SliceLayout, hash_upper: &str) -> String {
+    match layout {
+        SliceLayout::V3Bucket => format!("slices_v3/{}/{}", hash_path_char(hash_upper), hash_upper),
+        SliceLayout::Flat => format!("slices/{hash_upper}"),
+    }
+}
+
 async fn ownership_token(demux: &mut Demux, product_id: u32) -> Result<String> {
     let conn = demux.open_connection("ownership_service").await?;
     // A service connection must be initialized before it answers requests.
@@ -311,6 +329,39 @@ pub async fn install_game(
         }
     }
 
+    // Detect the slice CDN layout once (older titles like AC Unity are flat
+    // `slices/<HASH>`, newer ones bucketed `slices_v3/<c>/<HASH>`) by signing the
+    // first real slice under each and using whichever the CDN actually serves.
+    let slice_layout = {
+        let sample = files.iter().find_map(|f| {
+            if f.slice_list.is_empty() {
+                return None;
+            }
+            let h = match &f.slice_list[0].download_sha1 {
+                Some(d) if !d.is_empty() => hex_upper(d),
+                _ => hex_upper(f.slices.first().map(|v| v.as_slice()).unwrap_or_default()),
+            };
+            (!h.is_empty()).then_some(h)
+        });
+        match sample {
+            None => SliceLayout::V3Bucket,
+            Some(h) => {
+                let candidates = [SliceLayout::V3Bucket, SliceLayout::Flat];
+                let paths: Vec<String> = candidates.iter().map(|l| slice_path(*l, &h)).collect();
+                let urls = dl.sign(demux, product_id, paths).await?;
+                let mut chosen = SliceLayout::V3Bucket;
+                for (layout, u) in candidates.iter().zip(urls.iter()) {
+                    if client.get(u).send().await.map(|r| r.status().is_success()).unwrap_or(false) {
+                        chosen = *layout;
+                        break;
+                    }
+                }
+                eprintln!("[install] slice CDN layout: {chosen:?}");
+                chosen
+            }
+        }
+    };
+
     let mut skipped = 0usize;
     for (i, file) in files.iter().enumerate() {
         // Manifests use Windows `\` separators — map to the host separator so
@@ -351,7 +402,7 @@ pub async fn install_game(
                     Some(d) if !d.is_empty() => hex_upper(d),
                     _ => hex_upper(file.slices.get(i).map(|v| v.as_slice()).unwrap_or_default()),
                 };
-                format!("slices_v3/{}/{}", hash_path_char(&h), h)
+                slice_path(slice_layout, &h)
             })
             .collect();
         // Sign the file's slice paths (with reconnect + batching). AC-sized files
