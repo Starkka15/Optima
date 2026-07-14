@@ -362,8 +362,17 @@ pub async fn install_game(
         }
     };
 
+    // Progress is reported by BYTES, not file/slice count — one .forge file can be
+    // gigabytes while hundreds of others are tiny, so a file counter jumps wildly.
+    let total_bytes: u64 = files.iter().map(|f| f.size).sum();
+    let mut done_bytes: u64 = 0;
+    let mut last_emit: u64 = 0;
+    // Emit ~400 samples over the whole download, but at least every 4 MB — smooth
+    // bar without flooding the log.
+    let emit_step: u64 = (total_bytes / 400).max(4 * 1024 * 1024);
+
     let mut skipped = 0usize;
-    for (i, file) in files.iter().enumerate() {
+    for file in files.iter() {
         // Manifests use Windows `\` separators — map to the host separator so
         // subdirectories are created instead of literal-backslash filenames.
         let rel = file.name.replace('\\', std::path::MAIN_SEPARATOR_STR);
@@ -386,6 +395,7 @@ pub async fn install_game(
         if let Ok(meta) = tokio::fs::metadata(&out_path).await {
             if meta.len() == file.size {
                 skipped += 1;
+                done_bytes += file.size; // already on disk — counts toward progress
                 continue;
             }
         }
@@ -467,19 +477,34 @@ pub async fn install_game(
             out.write_all(&bytes)
                 .await
                 .with_context(|| format!("writing to part file {}", tmp_path.display()))?;
+            // Accumulate progress by BYTES as each slice lands (not per file) so the
+            // UI bar climbs smoothly through a multi-GB .forge and the frontend can
+            // derive speed from consecutive samples. Throttled so we don't print
+            // thousands of lines. `[<done>/<total> B]` is the machine token; the GB
+            // figure is for humans/logs.
+            done_bytes += bytes.len() as u64;
+            if done_bytes - last_emit >= emit_step {
+                last_emit = done_bytes;
+                println!(
+                    "  [{done_bytes}/{total_bytes} B] {:.2}/{:.2} GB — {}",
+                    done_bytes as f64 / 1e9,
+                    total_bytes as f64 / 1e9,
+                    file.name
+                );
+            }
         }
         out.flush().await?;
         drop(out);
         tokio::fs::rename(&tmp_path, &out_path)
             .await
             .with_context(|| format!("rename {} -> {}", tmp_path.display(), out_path.display()))?;
-
-        // Print progress every few files so the UI bar actually moves on games
-        // with large files (AC-sized .forge files are hundreds of MB each).
-        if (i + 1) % 5 == 0 || i + 1 == files.len() {
-            println!("  [{}/{}] {}", i + 1, files.len(), file.name);
-        }
     }
+    // Final 100% sample.
+    println!(
+        "  [{total_bytes}/{total_bytes} B] {:.2}/{:.2} GB — done",
+        total_bytes as f64 / 1e9,
+        total_bytes as f64 / 1e9
+    );
 
     if skipped > 0 {
         println!("  ({skipped} files already present, skipped)");
