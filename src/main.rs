@@ -333,7 +333,7 @@ async fn do_install(product_id: u32, path: Option<String>) -> Result<()> {
                 if attempt > 30 {
                     return Err(e.context("install failed after 30 whole-run retries"));
                 }
-                eprintln!("[install] run failed ({e}); reconnecting demux and resuming (attempt {attempt})...");
+                eprintln!("[install] run failed ({e:#}); reconnecting demux and resuming (attempt {attempt})...");
                 // Backoff grows with attempts (capped) so a persistent failure
                 // doesn't hammer the CDN / trip a 429.
                 let backoff = std::cmp::min(3 * attempt as u64, 30);
