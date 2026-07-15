@@ -163,3 +163,8 @@ affiliated with, endorsed by, or supported by Ubisoft. "Ubisoft", "Uplay", and
 "Ubisoft Connect" are trademarks of Ubisoft Entertainment.
 
 Licensed under the [MIT License](LICENSE).
+
+## AI Disclosure
+
+This project is developed with AI assistance. See **[AI.md](AI.md)** for how AI is used
+here, the ethical obligations behind it, and how upstream credit and licensing are handled.
