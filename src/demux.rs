@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Starkka15
+
 //! Ubisoft Connect Demux client (`dmx.upc.ubisoft.com`).
 //!
 //! Demux is a length-prefixed protobuf protocol over TLS — NOT behind DataDome,

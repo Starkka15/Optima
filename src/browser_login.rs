@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Starkka15
+
 //! Browser login, the maxima/GOG way: open the user's REAL system browser (it
 //! renders fine and clears DataDome + 2FA on its own — unlike an embedded
 //! webview), then capture the `ubi_v1` ticket. Two capture paths run together,

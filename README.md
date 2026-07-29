@@ -162,7 +162,9 @@ the Ubisoft Terms of Service and the laws of your jurisdiction. It is not
 affiliated with, endorsed by, or supported by Ubisoft. "Ubisoft", "Uplay", and
 "Ubisoft Connect" are trademarks of Ubisoft Entertainment.
 
-Licensed under the [MIT License](LICENSE).
+Licensed under the [GNU General Public License v3.0 or later](LICENSE). If you
+fork Optima, any changes you distribute must also be released under the GPL —
+please contribute fixes back.
 
 ## AI Disclosure
 

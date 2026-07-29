@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Starkka15
+
 //! Optima — an ownership-backed Ubisoft Connect client (maxima-cli style).
 //!
 //! P0 (this build): UbiServices authentication. `login` stores a session ticket;

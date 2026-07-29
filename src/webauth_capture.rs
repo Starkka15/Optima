@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Starkka15
+
 //! User-friendly unified login. One local page, one browser session, everything
 //! captured in the right order:
 //!   1. Our own form collects **email + password** — the two values Ubisoft's

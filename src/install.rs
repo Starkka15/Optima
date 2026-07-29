@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Starkka15
+
 //! Game installer (P2): download an owned game's files from the Ubisoft CDN.
 //!
 //! Flow (mirrors YoobieRE's manifest-downloader):

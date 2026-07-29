@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Starkka15
+
 //! On-disk state: the stored Ubisoft session/token, in `auth.toml` under the
 //! platform data dir (mirrors Maxima's `auth.toml`). Never contains the user's
 //! password — only the returned session ticket + refresh (rememberMe) ticket.

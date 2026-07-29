@@ -2,6 +2,7 @@
 name = "optima-cli"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 description = "Optima — an ownership-backed Ubisoft Connect client (auth / library / install / launch), maxima-cli style"
 
 [[bin]]

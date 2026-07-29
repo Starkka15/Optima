@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Starkka15
+
 //! prost-generated types from the reverse-engineered Ubisoft Connect protobufs
 //! (proto/demux.proto, proto/ownership.proto — sourced from YoobieRE's work).
 //! Package `mg.protocol.demux` / `mg.protocol.ownership`.

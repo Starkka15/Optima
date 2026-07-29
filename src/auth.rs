@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Starkka15
+
 //! UbiServices authentication (P0).
 //!
 //! Login is a `POST` to the public UbiServices session endpoint with HTTP Basic

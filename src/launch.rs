@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Starkka15
+
 //! Game launch (P3): satisfy Uplay R1 DRM without the full Ubisoft Connect
 //! launcher, then run the game under Proton.
 //!
