@@ -6,3 +6,6 @@ auth.toml
 profile.toml
 # Cargo.lock IS committed on purpose: this is an application, and pinning exact
 # dependency versions lets anyone reproduce and audit the exact build.
+
+# code-signing private key: never commit. Only the .cer/.crt (public) ship.
+drm/signing/*.key
