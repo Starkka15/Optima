@@ -506,7 +506,81 @@ pub async fn install_game(
     let emit_step: u64 = (total_bytes / 400).max(4 * 1024 * 1024);
 
     let mut skipped = 0usize;
-    for file in files.iter() {
+
+    // Signing used to happen once per file. With a real game that is mostly
+    // small files — Beyond Good & Evil is 187 files / 1531 slices, median one
+    // slice per file — that meant ~187 serialised demux round trips for work
+    // that batches 100 paths at a time. Plan everything first, sign it in one
+    // pass, then spend the network on actual downloading.
+    struct Planned {
+        index: usize,
+        out_path: PathBuf,
+        slice_paths: Vec<String>,
+        checks: Vec<SliceCheck>,
+    }
+    let mut planned: Vec<Planned> = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        if file.slice_list.is_empty() {
+            continue; // empty file / dir: handled in the write pass
+        }
+        let out_path = safe_install_path(install_dir, &file.name)?;
+        if let Ok(meta) = tokio::fs::metadata(&out_path).await {
+            if meta.len() == file.size {
+                continue; // resume: already complete, nothing to sign
+            }
+        }
+        let slice_paths: Vec<String> = file
+            .slice_list
+            .iter()
+            .enumerate()
+            .map(|(i, sl)| {
+                let h = match &sl.download_sha1 {
+                    Some(d) if !d.is_empty() => hex_upper(d),
+                    _ => hex_upper(file.slices.get(i).map(|v| v.as_slice()).unwrap_or_default()),
+                };
+                slice_path(slice_layout, &h)
+            })
+            .collect();
+        let checks: Vec<SliceCheck> = file
+            .slice_list
+            .iter()
+            .enumerate()
+            .map(|(i, sl)| SliceCheck {
+                download_size: sl.download_size,
+                download_sha1: sl.download_sha1.clone(),
+                size: sl.size,
+                content_sha1: file.slices.get(i).cloned(),
+            })
+            .collect();
+        planned.push(Planned { index, out_path, slice_paths, checks });
+    }
+
+    let checks_by_file: std::collections::HashMap<usize, Vec<SliceCheck>> =
+        planned.iter().map(|p| (p.index, p.checks.clone())).collect();
+
+    // Signed CDN urls carry an expiry token, so signing the whole install up
+    // front would hand the last files links that have already died. Sign a
+    // window of upcoming files instead: few enough round trips to stop the
+    // per-file stall, recent enough that the urls are still valid when used.
+    const SIGN_WINDOW_SLICES: usize = 400;
+    let mut urls_by_file: std::collections::HashMap<usize, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut next_to_sign = 0usize;
+    let sign_window = |from: usize| -> (usize, Vec<String>, Vec<usize>, Vec<usize>) {
+        let mut paths = Vec::new();
+        let mut owners = Vec::new();
+        let mut counts = Vec::new();
+        let mut i = from;
+        while i < planned.len() && paths.len() < SIGN_WINDOW_SLICES {
+            paths.extend(planned[i].slice_paths.iter().cloned());
+            owners.push(planned[i].index);
+            counts.push(planned[i].slice_paths.len());
+            i += 1;
+        }
+        (i, paths, owners, counts)
+    };
+
+    for (file_index, file) in files.iter().enumerate() {
         // Manifests use Windows `\` separators and arrive over the network:
         // validated rather than joined straight on. See `safe_install_path`.
         let out_path = safe_install_path(install_dir, &file.name)?;
@@ -533,45 +607,37 @@ pub async fn install_game(
             }
         }
 
-        // The CDN key is each slice's `downloadSha1` (the hash of the *compressed*
-        // blob), NOT `File.slices` (the uncompressed content hash). Fall back to
-        // the content hash for older, uncompressed manifests.
-        let slice_paths: Vec<String> = file
-            .slice_list
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let h = match &s.download_sha1 {
-                    Some(d) if !d.is_empty() => hex_upper(d),
-                    _ => hex_upper(file.slices.get(i).map(|v| v.as_slice()).unwrap_or_default()),
-                };
-                slice_path(slice_layout, &h)
-            })
-            .collect();
-        let checks: Vec<SliceCheck> = file
-            .slice_list
-            .iter()
-            .enumerate()
-            .map(|(i, s)| SliceCheck {
-                download_size: s.download_size,
-                download_sha1: s.download_sha1.clone(),
-                size: s.size,
-                content_sha1: file.slices.get(i).cloned(),
-            })
-            .collect();
-
-        // Sign the file's slice paths (with reconnect + batching). AC-sized files
-        // have thousands of slices; packing them all into one urlReq makes a
-        // protobuf big enough that the server drops the socket — so sign in
-        // batches, reconnecting the whole session on any failure.
-        let urls = sign_all(demux, &mut dl, demux_ticket, product_id, &slice_paths).await?;
+        let checks: Vec<SliceCheck> = checks_by_file.get(&file_index).cloned().unwrap_or_default();
+        if !urls_by_file.contains_key(&file_index) {
+            // This file is in the plan but its window has not been signed yet.
+            let planned_here = planned.iter().any(|p| p.index == file_index);
+            if !planned_here {
+                continue; // resume skipped it, or it has no slices
+            }
+            let (next, paths, owners, counts) = sign_window(next_to_sign);
+            if paths.is_empty() {
+                continue;
+            }
+            let signed = sign_all(demux, &mut dl, demux_ticket, product_id, &paths).await?;
+            if signed.len() != paths.len() {
+                bail!("signing returned {} urls for {} slices", signed.len(), paths.len());
+            }
+            let mut at = 0usize;
+            for (owner, n) in owners.into_iter().zip(counts) {
+                urls_by_file.insert(owner, signed[at..at + n].to_vec());
+                at += n;
+            }
+            next_to_sign = next;
+        }
+        let urls: Vec<String> = match urls_by_file.remove(&file_index) {
+            Some(u) => u,
+            None => continue,
+        };
         if std::env::var_os("OPTIMA_DEBUG").is_some() {
             eprintln!(
-                "[file {}] {} slices, {} urls; slice0 path={} url={}",
+                "[file {}] {} urls (pre-signed); url0={}",
                 file.name,
-                slice_paths.len(),
                 urls.len(),
-                slice_paths.first().cloned().unwrap_or_default(),
                 urls.first().map(|u| u.chars().take(120).collect::<String>()).unwrap_or_default()
             );
         }

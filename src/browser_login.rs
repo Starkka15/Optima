@@ -14,7 +14,6 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::config::Auth;
 
 /// Ubisoft account sign-in — a plain page that renders in any real browser.
 const LOGIN_PAGE: &str = "https://account.ubisoft.com/";
