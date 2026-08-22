@@ -405,11 +405,9 @@ async fn do_login(
     // DataDome-walled password endpoint entirely. Store it and let the Demux
     // ownership calls (which are NOT behind DataDome) use it.
     if let Some(ticket) = ticket {
-        let auth = config::Auth {
-            ticket,
-            session_id: session_id.unwrap_or_default(),
-            ..Default::default()
-        };
+        // Upgrade the bare ticket into a real session so it carries an expiry
+        // and a rememberMe ticket; otherwise `refresh` can never work.
+        let auth = auth::upgrade_captured_ticket(&ticket, &session_id.unwrap_or_default()).await;
         config::save_auth(&auth)?;
         println!("Stored browser-captured ticket. Try `optima-cli whoami` (REST /me may still be DataDome-walled) and the upcoming `list-games` (Demux, not walled).");
         return Ok(());
@@ -1119,7 +1117,22 @@ async fn do_whoami() -> Result<()> {
     println!("Stored session:");
     println!("  name:       {}", auth.name_on_platform);
     println!("  profileId:  {}", auth.profile_id);
-    println!("  expiration: {} ({})", auth.expiration, if auth.is_expired() { "EXPIRED" } else { "valid" });
+    // An empty expiry used to print as "(valid)", which is how a long-dead
+    // ticket looked healthy right up until every call 401'd.
+    if auth.expiration.is_empty() {
+        println!("  expiration: unknown — this session was stored without one");
+    } else {
+        println!(
+            "  expiration: {} ({})",
+            auth.expiration,
+            if auth.is_expired() { "EXPIRED" } else { "valid" }
+        );
+    }
+    if auth.remember_me_ticket.is_empty() {
+        println!("  refresh:    unavailable (no rememberMe ticket stored)");
+    } else {
+        println!("  refresh:    available");
+    }
 
     // Live check — the real proof the ticket authorizes API calls.
     let (status, body) = auth::fetch_me(&auth).await?;

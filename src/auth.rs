@@ -80,16 +80,39 @@ fn to_auth(r: SessionResponse) -> Auth {
 /// Step 1: email + password. Returns a full session, or a 2FA challenge.
 pub async fn login(email: &str, password: &str) -> Result<LoginOutcome> {
     let basic = base64::engine::general_purpose::STANDARD.encode(format!("{email}:{password}"));
-    let resp = client()?
-        .post(SESSIONS_URL)
-        .header("Content-Type", "application/json")
-        .header("Ubi-AppId", UBI_APP_ID)
-        .header("Ubi-RequestedPlatformType", "uplay")
-        .header("Authorization", format!("Basic {basic}"))
-        .json(&serde_json::json!({ "rememberMe": true }))
-        .send()
-        .await
-        .context("sending login request")?;
+    let send = |challenge: Option<String>| {
+        let basic = basic.clone();
+        async move {
+            let mut req = client()?
+                .post(SESSIONS_URL)
+                .header("Content-Type", "application/json")
+                .header("Ubi-AppId", UBI_APP_ID)
+                .header("Ubi-RequestedPlatformType", "uplay")
+                .header("Authorization", format!("Basic {basic}"));
+            if let Some(c) = challenge {
+                req = req.header("Ubi-Challenge", c);
+            }
+            req.json(&serde_json::json!({ "rememberMe": true }))
+                .send()
+                .await
+                .context("sending login request")
+        }
+    };
+
+    let resp = send(None).await?;
+    // UbiServices can answer a login with a challenge that must be echoed back
+    // on a second, otherwise identical request. Without this the login just
+    // looks like it failed. Replayed once only — a challenge that repeats is a
+    // real refusal, not a handshake.
+    if let Some(challenge) = resp
+        .headers()
+        .get("Ubi-Challenge")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+    {
+        eprintln!("[auth] server issued a challenge; replaying the login with it");
+        return parse_session(send(Some(challenge)).await?).await;
+    }
 
     parse_session(resp).await
 }
@@ -97,25 +120,95 @@ pub async fn login(email: &str, password: &str) -> Result<LoginOutcome> {
 /// Step 2 (only if `login` returned `TwoFactorRequired`): echo the 2FA ticket as
 /// the bearer and supply the user's authenticator/SMS code via `Ubi-2FACode`.
 pub async fn login_2fa(two_factor_ticket: &str, code: &str) -> Result<LoginOutcome> {
-    let resp = client()?
-        .post(SESSIONS_URL)
-        .header("Content-Type", "application/json")
-        .header("Ubi-AppId", UBI_APP_ID)
-        .header("Ubi-RequestedPlatformType", "uplay")
-        .header("Authorization", format!("ubi_v1 t={two_factor_ticket}"))
-        .header("Ubi-2FACode", code)
-        .json(&serde_json::json!({ "rememberMe": true }))
-        .send()
-        .await
-        .context("sending 2FA request")?;
+    // Ubisoft's own clients send the challenge ticket under `ubi_2fa_v1`, not
+    // `ubi_v1`. Which one this endpoint accepts is not documented, so try the
+    // observed scheme first and fall back rather than betting on either.
+    for scheme in ["ubi_2fa_v1", "ubi_v1"] {
+        let resp = client()?
+            .post(SESSIONS_URL)
+            .header("Content-Type", "application/json")
+            .header("Ubi-AppId", UBI_APP_ID)
+            .header("Ubi-RequestedPlatformType", "uplay")
+            .header("Authorization", format!("{scheme} t={two_factor_ticket}"))
+            .header("Ubi-2FACode", code)
+            .json(&serde_json::json!({ "rememberMe": true }))
+            .send()
+            .await
+            .context("sending 2FA request")?;
 
-    parse_session(resp).await
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && scheme == "ubi_2fa_v1" {
+            eprintln!("[auth] ubi_2fa_v1 rejected; retrying with ubi_v1");
+            continue;
+        }
+        return parse_session(resp).await;
+    }
+    unreachable!("the loop returns or continues exactly once")
 }
 
 /// The app id whose ticket the Demux `uplay_pc` auth accepts (same one
 /// ubisoft-demux-node uses). A browser ticket is issued for the *web* app, so we
 /// re-request a session for this app id using the existing ticket as bearer.
 pub const DEMUX_APP_ID: &str = "f68a4bb5-608a-4ff2-8123-be8ef797e0a6";
+
+/// Exchange a valid `ubi_v1` ticket for a **complete** session scoped to
+/// `app_id`.
+///
+/// The browser/WebAuth capture paths only ever see a bare ticket: no session id,
+/// no expiry, and no rememberMe ticket, so `refresh` could not work and the
+/// stored session looked valid long after it had expired. Re-requesting a
+/// session with the captured ticket as bearer returns the full object, which is
+/// what those paths should store.
+pub async fn exchange_session(ticket: &str, app_id: &str) -> Result<Auth> {
+    let resp = client()?
+        .post(SESSIONS_URL)
+        .header("Content-Type", "application/json")
+        .header("Ubi-AppId", app_id)
+        .header("Ubi-RequestedPlatformType", "uplay")
+        .header("Authorization", format!("ubi_v1 t={ticket}"))
+        .json(&serde_json::json!({ "rememberMe": true }))
+        .send()
+        .await
+        .context("sending ticket-exchange request")?;
+    let status = resp.status();
+    let body = resp.text().await.context("reading exchange body")?;
+    if !status.is_success() {
+        bail!("ticket exchange returned {status}: {body}");
+    }
+    let parsed: SessionResponse =
+        serde_json::from_str(&body).with_context(|| format!("parsing exchange json: {body}"))?;
+    if parsed.ticket.is_empty() {
+        bail!("ticket exchange returned no ticket: {body}");
+    }
+    Ok(to_auth(parsed))
+}
+
+/// Upgrade a bare captured ticket into a full session for our own app id.
+/// Falls back to the bare ticket if Ubisoft refuses the exchange, so a capture
+/// that used to work still works.
+pub async fn upgrade_captured_ticket(ticket: &str, session_id: &str) -> Auth {
+    match exchange_session(ticket, UBI_APP_ID).await {
+        Ok(mut full) => {
+            if full.session_id.is_empty() {
+                full.session_id = session_id.to_string();
+            }
+            if full.remember_me_ticket.is_empty() {
+                eprintln!(
+                    "[auth] note: Ubisoft returned no rememberMe ticket; \
+                     `refresh` will not work for this session"
+                );
+            }
+            full
+        }
+        Err(e) => {
+            eprintln!("[auth] could not upgrade the captured ticket ({e}); storing it as-is");
+            Auth {
+                ticket: ticket.to_string(),
+                session_id: session_id.to_string(),
+                ..Default::default()
+            }
+        }
+    }
+}
 
 /// Exchange a valid `ubi_v1` ticket for one scoped to `app_id`. Because this is
 /// authorized by an existing ticket (not a password), DataDome generally lets it

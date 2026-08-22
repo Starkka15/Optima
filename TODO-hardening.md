@@ -70,14 +70,24 @@ Each item below was checked against this tree before being listed.
 
 ## P5 — auth (needs a live account to confirm)
 
-- [ ] MFA posts `Authorization: ubi_v1 t=<2fa ticket>` + `Ubi-2FACode`. The
+- [x] MFA posts `Authorization: ubi_v1 t=<2fa ticket>` + `Ubi-2FACode`. The
       review says the observed scheme is `ubi_2fa_v1`. Ours may still work;
       confirm against the real endpoint before changing.
-      *Verified in code at `auth.rs:99-106`; the claim itself is untested here.*
-- [ ] No `Ubi-Challenge` replay handling.
-- [ ] Browser/WebAuth paths store a ticket with empty session id, expiry and
-      remember-me ticket, so silent renewal cannot work on those paths — the
-      README claims it does. Either implement renewal or correct the README.
+      *Done 2026-08-22: tries `ubi_2fa_v1` first and falls back to `ubi_v1` on
+      401, so whichever the endpoint wants, login works. STILL UNPROVEN — needs
+      an account with 2FA enabled to say which one is actually right.*
+- [x] No `Ubi-Challenge` replay handling.
+      *Done 2026-08-22: a `Ubi-Challenge` response header is echoed back on one
+      replayed login. UNPROVEN — has not been seen in the wild here, so the
+      header name comes from the review, not observation.*
+- [x] Browser/WebAuth paths store a ticket with empty session id, expiry and
+      remember-me ticket, so silent renewal cannot work on those paths.
+      *Done 2026-08-22: all three capture paths (`--ticket`, `--local`,
+      browser) now exchange the bare ticket for a full session via
+      `upgrade_captured_ticket()`, which yields the expiry and rememberMe
+      ticket, falling back to storing the bare ticket if Ubisoft refuses.
+      `whoami` no longer prints "(valid)" for a session with no expiry — it
+      says the expiry is unknown and whether refresh is even possible.*
 
 ## P6 — throughput (only after the above)
 

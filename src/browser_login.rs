@@ -53,7 +53,7 @@ pub async fn run() -> Result<()> {
             accept = accept_opt(&listener) => {
                 if let Some(mut socket) = accept {
                     if let Some(ticket) = read_ticket_from_request(&mut socket).await {
-                        return finish(&ticket);
+                        return finish(&ticket).await;
                     }
                 }
             }
@@ -68,7 +68,7 @@ pub async fn run() -> Result<()> {
                     continue;
                 }
                 match extract_ticket(&input) {
-                    Some(ticket) => return finish(&ticket),
+                    Some(ticket) => return finish(&ticket).await,
                     None => {
                         println!("Couldn't find a ticket there. Paste just the token — the part after 'ubi_v1 t='.");
                         line.clear();
@@ -136,11 +136,11 @@ fn extract_ticket(input: &str) -> Option<String> {
     None
 }
 
-fn finish(ticket: &str) -> Result<()> {
-    let auth = Auth {
-        ticket: ticket.to_string(),
-        ..Default::default()
-    };
+async fn finish(ticket: &str) -> Result<()> {
+    // A bare ticket has no expiry and no rememberMe, so exchange it for a full
+    // session before storing — otherwise `refresh` is impossible and `whoami`
+    // reports a dead ticket as valid.
+    let auth = crate::auth::upgrade_captured_ticket(ticket, "").await;
     crate::config::save_auth(&auth)?;
     println!("Ticket captured and saved. Run `optima-cli list-games` (Demux — not DataDome-walled).");
     Ok(())

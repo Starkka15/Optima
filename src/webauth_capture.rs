@@ -173,6 +173,23 @@ pub async fn run() -> Result<()> {
         ..Default::default()
     };
 
+    // Turn the captured ticket into a full session (expiry + rememberMe) before
+    // anything else looks at it; without this `refresh` can never work.
+    {
+        let upgraded = crate::auth::upgrade_captured_ticket(&auth.ticket, &auth.session_id).await;
+        if !upgraded.ticket.is_empty() {
+            let keep_name = auth.name_on_platform.clone();
+            let keep_profile = auth.profile_id.clone();
+            auth = upgraded;
+            if auth.name_on_platform.is_empty() {
+                auth.name_on_platform = keep_name;
+            }
+            if auth.profile_id.is_empty() {
+                auth.profile_id = keep_profile;
+            }
+        }
+    }
+
     // Recover the username (and profile id) from the ticket — no typing needed.
     match crate::auth::fetch_me(&auth).await {
         Ok((status, body)) if status.is_success() => {
