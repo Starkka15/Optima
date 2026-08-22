@@ -33,14 +33,20 @@ Each item below was checked against this tree before being listed.
 
 ## P2 — download integrity
 
-- [ ] Slices are never verified. `download_sha1` is used only to build the CDN
+- [x] Slices are never verified. `download_sha1` is used only to build the CDN
       key; nothing checks the bytes that come back. Verify the compressed blob
       against `download_sha1`, and the decompressed output against the content
       hash + expected size.
-      *Verified: `install.rs:400-440`. Note the per-file temp+rename already
-      exists, so only the hashing is missing.*
+      *Done 2026-08-22: `verify_and_decompress()` checks compressed size vs
+      `downloadSize`, compressed SHA-1 vs `downloadSha1`, decompressed size vs
+      `Slice.size`, and decompressed SHA-1 vs `File.slices[i]`, then the whole
+      file's byte count vs `File.size` before the rename. Hash mismatches are
+      not retried — the CDN served something definite and wrong. Manifests
+      lacking hashes still install (size checks only). 4 unit tests.
+      NOT yet confirmed against a real CDN download — see below.*
 - [ ] Resume trusts a size match alone. Re-verify the content hash before
-      skipping an existing file.
+      skipping an existing file. (Deliberately left: re-hashing a 50 GB install
+      on every resume is worse than the risk. Wants a `--verify` flag instead.)
 
 ## P3 — process environment hygiene
 

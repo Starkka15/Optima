@@ -10,6 +10,7 @@ name = "optima-cli"
 path = "src/main.rs"
 
 [dependencies]
+sha1 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "time", "fs"] }
 prost = "0.13"
 bytes = "1"

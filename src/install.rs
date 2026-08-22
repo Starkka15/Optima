@@ -27,6 +27,72 @@ use tokio::io::AsyncWriteExt;
 /// reach. Only plain relative components are accepted, and no existing ancestor
 /// inside the tree may be a symlink — otherwise a link planted by an earlier
 /// entry would redirect a later write outside the install dir.
+/// What the manifest promises about one slice, so the bytes can be checked
+/// against it. `download_sha1` covers the *compressed* blob as served by the
+/// CDN; `content_sha1` covers the decompressed result.
+#[derive(Clone)]
+struct SliceCheck {
+    download_size: Option<u32>,
+    download_sha1: Option<Vec<u8>>,
+    size: u32,
+    content_sha1: Option<Vec<u8>>,
+}
+
+fn sha1_hex(data: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    hex_upper(&hasher.finalize())
+}
+
+/// Check a slice as served, then as decompressed.
+///
+/// The CDN is not trusted to return what was asked for: a corrupted proxy, a
+/// truncated response or a swapped object would otherwise be written into the
+/// game with no complaint, and resume would then trust the result because the
+/// size matched.
+fn verify_and_decompress(
+    comp: i32,
+    raw: &[u8],
+    check: &SliceCheck,
+    file_name: &str,
+    index: usize,
+) -> Result<Vec<u8>> {
+    if let Some(expected) = check.download_size {
+        if raw.len() as u32 != expected {
+            bail!(
+                "{file_name} slice {index}: compressed size {} != manifest {expected}",
+                raw.len()
+            );
+        }
+    }
+    if let Some(expected) = check.download_sha1.as_ref().filter(|h| !h.is_empty()) {
+        let got = sha1_hex(raw);
+        let want = hex_upper(expected);
+        if got != want {
+            bail!("{file_name} slice {index}: compressed sha1 {got} != manifest {want}");
+        }
+    }
+
+    let out = decompress(comp, raw)?;
+
+    if out.len() as u32 != check.size {
+        bail!(
+            "{file_name} slice {index}: decompressed size {} != manifest {}",
+            out.len(),
+            check.size
+        );
+    }
+    if let Some(expected) = check.content_sha1.as_ref().filter(|h| !h.is_empty()) {
+        let got = sha1_hex(&out);
+        let want = hex_upper(expected);
+        if got != want {
+            bail!("{file_name} slice {index}: content sha1 {got} != manifest {want}");
+        }
+    }
+    Ok(out)
+}
+
 fn safe_install_path(install_dir: &Path, raw_name: &str) -> Result<PathBuf> {
     if raw_name.trim().is_empty() {
         bail!("manifest entry has an empty file name");
@@ -482,6 +548,18 @@ pub async fn install_game(
                 slice_path(slice_layout, &h)
             })
             .collect();
+        let checks: Vec<SliceCheck> = file
+            .slice_list
+            .iter()
+            .enumerate()
+            .map(|(i, s)| SliceCheck {
+                download_size: s.download_size,
+                download_sha1: s.download_sha1.clone(),
+                size: s.size,
+                content_sha1: file.slices.get(i).cloned(),
+            })
+            .collect();
+
         // Sign the file's slice paths (with reconnect + batching). AC-sized files
         // have thousands of slices; packing them all into one urlReq makes a
         // protobuf big enough that the server drops the socket — so sign in
@@ -510,14 +588,26 @@ pub async fn install_game(
         // straight to disk. Single-connection sequential fetching was the
         // bottleneck on AC-sized files (thousands of ~1 MB slices).
         const CONCURRENCY: usize = 16;
-        let mut stream = futures::stream::iter(urls.iter().cloned().map(|url| {
+        let fname = file.name.clone();
+        let mut stream = futures::stream::iter(
+            urls.iter().cloned().enumerate().map(|(idx, url)| {
             let client = client.clone();
+            let check = checks.get(idx).cloned();
+            let fname = fname.clone();
             async move {
                 let mut tries = 0;
                 loop {
                     match client.get(&url).send().await.and_then(|r| r.error_for_status()) {
                         Ok(resp) => match resp.bytes().await {
-                            Ok(b) => return decompress(comp, &b),
+                            Ok(b) => {
+                                return match check.as_ref() {
+                                    // A hash mismatch is not retried: the CDN
+                                    // served something definite and wrong, so
+                                    // repeating the request just repeats it.
+                                    Some(c) => verify_and_decompress(comp, &b, c, &fname, idx),
+                                    None => decompress(comp, &b),
+                                }
+                            }
                             Err(e) => {
                                 tries += 1;
                                 if tries > 5 {
@@ -535,7 +625,8 @@ pub async fn install_game(
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
             }
-        }))
+        }),
+        )
         .buffered(CONCURRENCY);
 
         use futures::StreamExt;
@@ -562,6 +653,17 @@ pub async fn install_game(
         }
         out.flush().await?;
         drop(out);
+        // Every slice matched, so the total must match too; if it does not the
+        // manifest disagrees with itself and the file must not be published.
+        let written = tokio::fs::metadata(&tmp_path).await?.len();
+        if written != file.size {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            bail!(
+                "{}: wrote {written} bytes but the manifest says {}",
+                file.name,
+                file.size
+            );
+        }
         tokio::fs::rename(&tmp_path, &out_path)
             .await
             .with_context(|| format!("rename {} -> {}", tmp_path.display(), out_path.display()))?;
@@ -582,8 +684,72 @@ pub async fn install_game(
 
 #[cfg(test)]
 mod tests {
-    use super::safe_install_path;
+    use super::{safe_install_path, sha1_hex, verify_and_decompress, SliceCheck};
     use std::path::Path;
+
+    /// Compression method 0 is not Deflate/Zstd, so `decompress` passes the
+    /// bytes through — lets these tests exercise verification, not codecs.
+    const PASSTHROUGH: i32 = 0;
+
+    fn check_for(payload: &[u8]) -> SliceCheck {
+        SliceCheck {
+            download_size: Some(payload.len() as u32),
+            download_sha1: Some(hex_to_bytes(&sha1_hex(payload))),
+            size: payload.len() as u32,
+            content_sha1: Some(hex_to_bytes(&sha1_hex(payload))),
+        }
+    }
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn accepts_a_slice_that_matches_the_manifest() {
+        let payload = b"the quick brown fox".to_vec();
+        let check = check_for(&payload);
+        let out = verify_and_decompress(PASSTHROUGH, &payload, &check, "game.dat", 0).unwrap();
+        assert_eq!(out, payload);
+    }
+
+    #[test]
+    fn rejects_a_corrupted_slice() {
+        let payload = b"the quick brown fox".to_vec();
+        let check = check_for(&payload);
+        let mut corrupt = payload.clone();
+        corrupt[3] ^= 0xff; // same length, different bytes
+        let err = verify_and_decompress(PASSTHROUGH, &corrupt, &check, "game.dat", 7)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sha1"), "unexpected error: {err}");
+        assert!(err.contains("slice 7"), "error should name the slice: {err}");
+    }
+
+    #[test]
+    fn rejects_a_truncated_slice() {
+        let payload = b"the quick brown fox".to_vec();
+        let check = check_for(&payload);
+        let err = verify_and_decompress(PASSTHROUGH, &payload[..10], &check, "game.dat", 0)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("compressed size"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn tolerates_a_manifest_without_hashes() {
+        // Older manifests omit downloadSha1/slices; size still has to line up.
+        let payload = b"legacy".to_vec();
+        let check = SliceCheck {
+            download_size: None,
+            download_sha1: None,
+            size: payload.len() as u32,
+            content_sha1: None,
+        };
+        assert!(verify_and_decompress(PASSTHROUGH, &payload, &check, "old.dat", 0).is_ok());
+    }
 
     #[test]
     fn accepts_plain_relative_paths() {
