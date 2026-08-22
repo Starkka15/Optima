@@ -374,6 +374,7 @@ button{width:100%;margin-top:1.2rem;padding:.7rem;border:0;border-radius:8px;bac
 font-weight:600;font-size:.95rem;cursor:pointer}
 button:hover{background:#f0723c} button:disabled{opacity:.5;cursor:default}
 button.alt{background:#2e2e3a;color:#ececf1} button.alt:hover{background:#3a3a48}
+.opt{opacity:.6;font-weight:400}
 .note{margin-top:1rem;font-size:.72rem;color:#6f6f80;text-align:center}
 #log{margin-top:1rem;background:#0e0e12;border:1px solid #2a2a34;border-radius:8px;padding:.6rem .7rem;
 font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;color:#8fbf8f;white-space:pre-wrap;max-height:180px;overflow:auto}
@@ -386,10 +387,13 @@ background:#15151a;color:#ececf1;font:12px ui-monospace,monospace}
 <div class=step>Step 1 of 2 · Saved on this device</div>
 <h1>Save your account for games</h1>
 <p>This does <strong>not</strong> sign you in yet. Optima stores these locally so your games can present your Uplay account offline. <strong>You'll sign in to Ubisoft for real on the next step.</strong></p>
-<label for=email>Ubisoft email</label>
-<input id=email name=email type=email autocomplete=username autofocus required>
+<label for=email>Display email <span class=opt>(optional)</span></label>
+<input id=email name=email type=email autocomplete=email autofocus
+       placeholder="leave blank to use a made-up one">
 <button id=btn type=submit>Save &amp; continue to Ubisoft sign-in &rarr;</button>
-<div class=note>Stored locally only — never sent anywhere but your own games.</div>
+<div class=note>Only ever shown to the game, and only stored on this machine.
+Leave it blank and Optima makes one up. No password is asked for or kept —
+the DRM emu never checks one.</div>
 </form>
 <div id=stage2 style="display:none">
 <div class=step>Step 2 of 2 · Sign in to Ubisoft</div>
