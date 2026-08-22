@@ -653,13 +653,17 @@ pub async fn install_game(
         // requests in flight and yields results in input order, so we stream them
         // straight to disk. Single-connection sequential fetching was the
         // bottleneck on AC-sized files (thousands of ~1 MB slices).
-        // In-flight slice requests for this file. 16 got 59% of a 103 MB/s
-        // line on a 1274-slice file; tune per link with OPTIMA_SLICE_CONCURRENCY.
+        // In-flight slice requests for this file. Measured on a 103 MB/s line
+        // with a 2.93 GB install (one 1274-slice file plus 186 small ones):
+        //   16 -> 47.7s   32 -> 45.6s   64 -> 54.2s
+        // 64 is worse than 16 and burns noticeably more sys time, so this is
+        // connection churn rather than bandwidth. 32 is the measured best;
+        // override per link with OPTIMA_SLICE_CONCURRENCY.
         let concurrency: usize = std::env::var("OPTIMA_SLICE_CONCURRENCY")
             .ok()
             .and_then(|v| v.parse().ok())
             .filter(|n| *n >= 1 && *n <= 256)
-            .unwrap_or(16);
+            .unwrap_or(32);
         let fname = file.name.clone();
         let mut stream = futures::stream::iter(
             urls.iter().cloned().enumerate().map(|(idx, url)| {
