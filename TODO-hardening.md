@@ -91,7 +91,7 @@ Each item below was checked against this tree before being listed.
 
 ## P6 — throughput (only after the above)
 
-- [ ] Downloader does 16 slices per file with files strictly sequential. The
+- [x] Downloader does 16 slices per file with files strictly sequential. The
       review's model is 1-8 files in flight with shared slice requests and a
       persistent slice cache.
 

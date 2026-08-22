@@ -653,7 +653,13 @@ pub async fn install_game(
         // requests in flight and yields results in input order, so we stream them
         // straight to disk. Single-connection sequential fetching was the
         // bottleneck on AC-sized files (thousands of ~1 MB slices).
-        const CONCURRENCY: usize = 16;
+        // In-flight slice requests for this file. 16 got 59% of a 103 MB/s
+        // line on a 1274-slice file; tune per link with OPTIMA_SLICE_CONCURRENCY.
+        let concurrency: usize = std::env::var("OPTIMA_SLICE_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n| *n >= 1 && *n <= 256)
+            .unwrap_or(16);
         let fname = file.name.clone();
         let mut stream = futures::stream::iter(
             urls.iter().cloned().enumerate().map(|(idx, url)| {
@@ -693,7 +699,7 @@ pub async fn install_game(
             }
         }),
         )
-        .buffered(CONCURRENCY);
+        .buffered(concurrency);
 
         use futures::StreamExt;
         while let Some(res) = stream.next().await {
