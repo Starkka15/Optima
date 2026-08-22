@@ -10,19 +10,26 @@ Each item below was checked against this tree before being listed.
 
 ## P0 — secret exposure
 
-- [ ] `drm/signing/optima-signing.key` is a real RSA private key, committed and
+- [x] `drm/signing/optima-signing.key` is a real RSA private key, committed and
       public since 2026-07-13. Treat as burned: generate a new key/cert, stop
       tracking the private half, and purge it from history (public, so the old
       key stays compromised regardless).
-      *Verified: present in `git log --all`, readable on github.com.*
+      *Done 2026-08-22: new key/cert, all four DLLs re-signed, private half
+      untracked, history purged and force-pushed. The old key is still
+      reachable via the orphaned commit `e452457` until GitHub GCs it, but it
+      only chains to the retired cert `A0:23:BA...`; shipped is `8F:3E:1B...`.*
 
 ## P1 — network-controlled paths
 
-- [ ] `install.rs:382` joins `file.name` straight from the manifest onto the
+- [x] `install.rs:382` joins `file.name` straight from the manifest onto the
       install dir. A manifest containing `..\..\` or an absolute path writes
       outside the game tree. Reject absolute paths, `..` components, and
       symlinked parents; verify the result stays inside the install dir.
-      *Verified: `let out_path = install_dir.join(&rel);`, no validation.*
+      *Done 2026-08-22: `safe_install_path()` rejects absolute paths, `..`,
+      drive/UNC prefixes, NUL, non-plain components, and any ancestor that is a
+      symlink, then re-checks containment. 3 unit tests — the first tests in
+      the project. Writing the tests caught a real gap: `/etc/passwd` was being
+      silently reinterpreted as relative instead of refused.*
 
 ## P2 — download integrity
 

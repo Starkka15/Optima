@@ -16,8 +16,73 @@
 use anyhow::{anyhow, bail, Context, Result};
 use prost::Message;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use tokio::io::AsyncWriteExt;
+
+/// Map a manifest-supplied file name onto a path inside `install_dir`.
+///
+/// `File.name` arrives over the network inside the manifest, so it is untrusted
+/// input. Joining it directly lets a manifest containing `..\..\.bashrc`, an
+/// absolute path, or a Windows drive prefix write anywhere the process can
+/// reach. Only plain relative components are accepted, and no existing ancestor
+/// inside the tree may be a symlink — otherwise a link planted by an earlier
+/// entry would redirect a later write outside the install dir.
+fn safe_install_path(install_dir: &Path, raw_name: &str) -> Result<PathBuf> {
+    if raw_name.trim().is_empty() {
+        bail!("manifest entry has an empty file name");
+    }
+    if raw_name.contains('\0') {
+        bail!("manifest path contains a NUL byte: {raw_name:?}");
+    }
+
+    // Manifests use Windows separators; treat both so `a\b` cannot smuggle a
+    // component past a `/`-only check.
+    let unified = raw_name.replace('\\', "/");
+    // An absolute name would be silently re-read as relative by the loop below.
+    // A manifest should never contain one, so refuse rather than reinterpret.
+    if unified.starts_with('/') {
+        bail!("manifest path is absolute: {raw_name:?}");
+    }
+    let mut out = install_dir.to_path_buf();
+    let mut depth = 0usize;
+
+    for part in unified.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => bail!("manifest path escapes the install dir: {raw_name:?}"),
+            _ => {}
+        }
+        // `C:` or `\\server` style prefixes, and anything the OS would treat as
+        // a root, must never become a component.
+        if part.ends_with(':') {
+            bail!("manifest path has a drive/volume prefix: {raw_name:?}");
+        }
+        let candidate = Path::new(part);
+        if candidate.components().any(|c| !matches!(c, Component::Normal(_))) {
+            bail!("manifest path has a non-plain component: {raw_name:?}");
+        }
+
+        out.push(part);
+        depth += 1;
+
+        // An ancestor that already exists as a symlink would move the write
+        // outside the tree even though every component looked plain.
+        if let Ok(meta) = std::fs::symlink_metadata(&out) {
+            if meta.file_type().is_symlink() {
+                bail!("manifest path crosses a symlink at {}", out.display());
+            }
+        }
+    }
+
+    if depth == 0 {
+        bail!("manifest path resolves to the install dir itself: {raw_name:?}");
+    }
+    // Belt and braces: the loop cannot produce an escape, but assert it anyway.
+    if !out.starts_with(install_dir) {
+        bail!("manifest path escapes the install dir: {raw_name:?}");
+    }
+    Ok(out)
+}
 
 use crate::demux::Demux;
 use crate::proto::{download, download_service, ownership};
@@ -376,10 +441,9 @@ pub async fn install_game(
 
     let mut skipped = 0usize;
     for file in files.iter() {
-        // Manifests use Windows `\` separators — map to the host separator so
-        // subdirectories are created instead of literal-backslash filenames.
-        let rel = file.name.replace('\\', std::path::MAIN_SEPARATOR_STR);
-        let out_path = install_dir.join(&rel);
+        // Manifests use Windows `\` separators and arrive over the network:
+        // validated rather than joined straight on. See `safe_install_path`.
+        let out_path = safe_install_path(install_dir, &file.name)?;
         if let Some(parent) = out_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -514,4 +578,61 @@ pub async fn install_game(
     }
     println!("Installed {name} to {}", install_dir.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_install_path;
+    use std::path::Path;
+
+    #[test]
+    fn accepts_plain_relative_paths() {
+        let root = Path::new("/tmp/game");
+        assert_eq!(
+            safe_install_path(root, "data\\textures\\hero.dds").unwrap(),
+            Path::new("/tmp/game/data/textures/hero.dds")
+        );
+        assert_eq!(
+            safe_install_path(root, "game.exe").unwrap(),
+            Path::new("/tmp/game/game.exe")
+        );
+        // "." components are noise, not an escape
+        assert_eq!(
+            safe_install_path(root, ".\\bin\\.\\x.dll").unwrap(),
+            Path::new("/tmp/game/bin/x.dll")
+        );
+    }
+
+    #[test]
+    fn rejects_traversal_and_absolute_paths() {
+        let root = Path::new("/tmp/game");
+        for bad in [
+            "..\\..\\.bashrc",
+            "data/../../etc/passwd",
+            "/etc/passwd",
+            "C:\\Windows\\System32\\evil.dll",
+            "\\\\server\\share\\x",
+            "",
+            "   ",
+            ".",
+        ] {
+            assert!(
+                safe_install_path(root, bad).is_err(),
+                "should have been rejected: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_paths_crossing_a_symlink() {
+        let tmp = std::env::temp_dir().join(format!("optima-test-{}", std::process::id()));
+        let root = tmp.join("game");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("mods")).unwrap();
+
+        assert!(safe_install_path(&root, "mods\\payload.dll").is_err());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }
