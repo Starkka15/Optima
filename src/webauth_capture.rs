@@ -3,7 +3,7 @@
 
 //! User-friendly unified login. One local page, one browser session, everything
 //! captured in the right order:
-//!   1. Our own form collects **email + password** — the two values Ubisoft's
+//!   1. Our own form collects a **display email** — the one value Ubisoft's
 //!      cross-origin login never exposes to us, and that the Uplay emu needs for
 //!      each game's `Uplay.toml`. Stored to `profile.toml`.
 //!   2. We embed Ubisoft's official **WebAuth SDK** (`connectSdkPublic.js`) and
@@ -52,8 +52,8 @@ const SDK_URL: &str =
 enum Action {
     /// Served a page (form or the /back bounce). Keep listening.
     Served,
-    /// The form posted the player's email + password.
-    Profile { email: String, password: String },
+    /// The form posted a display email. No password: the emu never checks one.
+    Profile { email: String },
     /// Ubisoft redirected back with the ticket.
     Ticket(String),
 }
@@ -122,7 +122,7 @@ pub async fn run() -> Result<()> {
         urlencode(&logged_in)
     );
 
-    // Open OUR page first (the email/password form), not Ubisoft directly — and
+    // Open OUR page first (the display-email form), not Ubisoft directly — and
     // via the localhost.ubisoft.com name so the SDK iframe is same-site with us.
     let start = format!("https://{HOST}:{PORT}/");
     if let Ok(browser) = std::env::var("BROWSER") {
@@ -150,13 +150,12 @@ pub async fn run() -> Result<()> {
         };
         match handle(&mut socket, &login_url).await? {
             Action::Served => {}
-            Action::Profile { email, password } => {
+            Action::Profile { email } => {
                 let mut p = config::load_profile().unwrap_or_default();
                 p.email = email;
-                p.password = password;
                 config::save_profile(&p)?;
                 if std::env::var_os("OPTIMA_DEBUG").is_some() {
-                    eprintln!("[profile] stored email + password");
+                    eprintln!("[profile] stored display email");
                 }
             }
             Action::Ticket(t) => {
@@ -263,21 +262,20 @@ where
     let path_and_query = parts.next().unwrap_or("/");
     let path = path_and_query.split('?').next().unwrap_or("/");
 
-    // POST /profile — the form submitting email + password.
+    // POST /profile — the form submitting the display email.
     if method == "POST" && path == "/profile" {
         let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-        let (mut email, mut password) = (String::new(), String::new());
+        let mut email = String::new();
         for pair in body.split('&') {
             if let Some((k, v)) = pair.split_once('=') {
                 match k {
                     "email" => email = urldecode(v),
-                    "password" => password = urldecode(v),
                     _ => {}
                 }
             }
         }
         send(socket, "200 OK", "text/plain", "ok").await;
-        return Ok(Action::Profile { email, password });
+        return Ok(Action::Profile { email });
     }
 
     // POST /ticket — the SDK page delivering the captured ticket (primary path).
@@ -390,8 +388,6 @@ background:#15151a;color:#ececf1;font:12px ui-monospace,monospace}
 <p>This does <strong>not</strong> sign you in yet. Optima stores these locally so your games can present your Uplay account offline. <strong>You'll sign in to Ubisoft for real on the next step.</strong></p>
 <label for=email>Ubisoft email</label>
 <input id=email name=email type=email autocomplete=username autofocus required>
-<label for=password>Password</label>
-<input id=password name=password type=password autocomplete=current-password required>
 <button id=btn type=submit>Save &amp; continue to Ubisoft sign-in &rarr;</button>
 <div class=note>Stored locally only — never sent anywhere but your own games.</div>
 </form>
@@ -477,9 +473,9 @@ async function go(e){
   e.preventDefault();
   var btn=document.getElementById('btn');btn.disabled=true;btn.textContent='Saving…';
   var email=document.getElementById('email').value.trim();
-  var password=document.getElementById('password').value;
+
   try{await fetch('/profile',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:new URLSearchParams({email:email,password:password}).toString()});}catch(_){}
+    body:new URLSearchParams({email:email}).toString()});}catch(_){}
   document.getElementById('stage1').style.display='none';
   document.getElementById('stage2').style.display='block';
   initSdk();

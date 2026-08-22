@@ -168,18 +168,38 @@ pub struct LaunchCache {
 }
 
 /// The account identity the Uplay R1 emu presents to games. Browser/ticket login
-/// never yields these (email/password aren't in the ticket), so the user supplies
+/// never yields these (the ticket carries no display email), so the user supplies
 /// them once — via `optima-cli profile set` on desktop, or the Optima extension's
 /// account form on the Ally. Written into each game's `Uplay.toml` at launch.
 /// None of it is validated online for offline SP; it's the local player identity.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Profile {
+    /// Shown to some games. Optional: synthesised from the username when unset,
+    /// so nobody has to hand over a real address to play offline.
     #[serde(default)]
     pub email: String,
     #[serde(default)]
     pub username: String,
-    #[serde(default)]
-    pub password: String,
+}
+
+/// What the DRM emu is handed as the account password.
+///
+/// It is never checked against anything: the vendored Orbit emu ships
+/// `Password = "123456"` as its own default and just interns the string and
+/// passes the pointer to the game. Storing a real password bought nothing and
+/// put it in plaintext in `profile.toml` **and** in `Uplay.ini` next to every
+/// game exe, where backups and cloud saves pick it up.
+pub const EMU_PLACEHOLDER_PASSWORD: &str = "optima";
+
+impl Profile {
+    /// An address to show the game. Never a real one unless the user set it.
+    pub fn display_email(&self) -> String {
+        if !self.email.trim().is_empty() {
+            return self.email.clone();
+        }
+        let user = if self.username.trim().is_empty() { "player" } else { self.username.trim() };
+        format!("{user}@optima.local")
+    }
 }
 
 fn profile_path() -> Result<PathBuf> {
@@ -194,6 +214,22 @@ pub fn save_profile(p: &Profile) -> Result<()> {
 
 pub fn load_profile() -> Result<Profile> {
     let path = profile_path()?;
+    // Older versions stored the account password here in plaintext. Remove it
+    // on sight rather than waiting for the next save.
+    if path.exists() {
+        if let Ok(raw) = read_private(&path) {
+            if raw.lines().any(|l| l.trim_start().starts_with("password")) {
+                if let Ok(p) = toml::from_str::<Profile>(&raw) {
+                    if write_private(&path, &toml::to_string_pretty(&p)?).is_ok() {
+                        eprintln!(
+                            "[profile] removed the stored password from {} — it was never needed",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
     if !path.exists() {
         return Ok(Profile::default());
     }

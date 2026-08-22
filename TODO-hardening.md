@@ -101,3 +101,25 @@ Recorded so they are not "borrowed" twice: `GetLatestManifests` fallback, legacy
 flat `slices/` layout, raw-deflate fallback, bounded per-file prefetch and
 byte-based progress are all present — the review credits Optima for them and
 ported them the other way.
+
+## P7 — stop storing credentials at all (2026-08-22)
+
+Prompted by "we shouldn't be storing passwords".
+
+- [x] `profile.toml` held the account password in plaintext, and it was written
+      into `Uplay.ini` **and** `Uplay.toml` next to every game exe, where
+      backups, cloud saves and prefix copies pick it up.
+      *The emu never checks it: the vendored Orbit emu ships
+      `Password = "123456"` as its own default and just interns the string and
+      hands the pointer to the game (`drm/orbit_r2/source/src/api.rs:31,381`).
+      Optima now passes a fixed placeholder. `--password` on `profile` is
+      accepted and ignored with a note, and the WebAuth page no longer has a
+      password field at all.*
+- [x] Existing stored passwords are removed on the first profile load, with a
+      message. Verified on the real profile here.
+- [x] The email is now optional and synthesised as `<username>@optima.local`
+      unless the user sets a real one.
+- [ ] `session_key` is stored but never read outside `config.rs`. Drop it.
+
+What remains on disk is a ticket, a rememberMe ticket, an opaque profile id and
+a display name — no reusable credentials.

@@ -596,11 +596,10 @@ async fn do_launch(product_id: u32, path: Option<String>, exe: Option<String>) -
     ])
     .unwrap_or_default();
     let email = if email.trim().is_empty() { resolve_email(&username) } else { email };
-    let password = first_nonempty([
-        std::env::var("OPTIMA_PASSWORD").ok(),
-        Some(profile.password.clone()),
-    ])
-    .unwrap_or_default();
+    // The emu never checks this, so no real password goes to disk or into the
+    // game folder. Overridable only for someone debugging the emu itself.
+    let password = std::env::var("OPTIMA_PASSWORD")
+        .unwrap_or_else(|_| config::EMU_PLACEHOLDER_PASSWORD.to_string());
 
     let acct = launch::LaunchAccount {
         user_id: cache.user_id.clone(),
@@ -1077,7 +1076,7 @@ async fn do_config(product_id: u32) -> Result<()> {
     Ok(())
 }
 
-fn do_profile(email: Option<String>, username: Option<String>, password: Option<String>) -> Result<()> {
+fn do_profile(email: Option<String>, username: Option<String>, _password: Option<String>) -> Result<()> {
     let mut p = config::load_profile().unwrap_or_default();
     let mut changed = false;
     if let Some(e) = email {
@@ -1088,9 +1087,11 @@ fn do_profile(email: Option<String>, username: Option<String>, password: Option<
         p.username = u;
         changed = true;
     }
-    if let Some(pw) = password {
-        p.password = pw;
-        changed = true;
+    if _password.is_some() {
+        println!(
+            "Note: --password is ignored and nothing is stored. The DRM emu never\n\
+             checks it, so Optima hands games a fixed placeholder instead."
+        );
     }
     if changed {
         config::save_profile(&p)?;
@@ -1105,7 +1106,7 @@ fn do_profile(email: Option<String>, username: Option<String>, password: Option<
         "  username: {}",
         if p.username.is_empty() { "(unset — uses Ubisoft display name)".to_string() } else { p.username.clone() }
     );
-    println!("  password: {}", if p.password.is_empty() { "(unset)" } else { "********" });
+    println!("  password: not stored (the emu is given a fixed placeholder)");
     Ok(())
 }
 
