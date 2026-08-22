@@ -477,23 +477,52 @@ fn wow64_variant(key: &str) -> Option<String> {
 /// that Authenticode-verify the folder-local loader DLL (e.g. Watch_Dogs) accept
 /// our signed shims. Marker-guarded (one Proton spin-up per prefix). Best-effort.
 fn ensure_cert_trust(umu: &Path, proton: &Option<PathBuf>, prefix: &Path) {
+    // The marker records WHICH cert was trusted, not merely that one was. A
+    // bare "done" marker meant that rotating the signing key left old prefixes
+    // trusting the retired cert while the shipped DLLs were signed with the new
+    // one, so anti-tamper titles failed and the retired cert stayed trusted.
+    let want = cert_fingerprint(SIGNING_CERT);
     let marker = prefix.join(".optima-cert");
-    if marker.exists() {
+    if std::fs::read_to_string(&marker).map(|s| s.trim() == want).unwrap_or(false) {
         return;
     }
+    let rotated = marker.exists();
+
     let cer = prefix.join("optima-signing.cer");
     if std::fs::write(&cer, SIGNING_CERT).is_err() {
         return;
     }
     let win = wine_path(&cer);
-    println!("[launch] trusting Optima signing cert in prefix Root store");
+    if rotated {
+        println!("[launch] signing cert changed — replacing it in the prefix stores");
+    } else {
+        println!("[launch] trusting Optima signing cert in prefix Root store");
+    }
+
     // certutil.exe is a Wine builtin; run it through umu like `reg`.
     for store in ["Root", "TrustedPublisher"] {
+        // Drop any previous copy first. Ours is the only cert with this subject
+        // in this throwaway prefix, so deleting by subject cannot hit a real CA.
+        if rotated {
+            let mut del = std::process::Command::new("python3");
+            del.arg(umu)
+                .arg("certutil")
+                .arg("-delstore")
+                .arg(store)
+                .arg("Ubisoft Entertainment Sweden AB")
+                .env("WINEPREFIX", prefix)
+                .env("GAMEID", "0")
+                .env("STORE", "none");
+            if let Some(p) = proton {
+                del.env("PROTONPATH", p);
+            }
+            let _ = del.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        }
+
         let mut cmd = std::process::Command::new("python3");
         cmd.arg(umu)
             .arg("certutil")
             .arg("-addstore")
-            .arg("-f")
             .arg(store)
             .arg(&win)
             .env("WINEPREFIX", prefix)
@@ -502,14 +531,19 @@ fn ensure_cert_trust(umu: &Path, proton: &Option<PathBuf>, prefix: &Path) {
         if let Some(p) = proton {
             cmd.env("PROTONPATH", p);
         }
-        let _ = cmd.status();
+        let _ = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     }
-    std::fs::write(&marker, "").ok();
+    let _ = std::fs::write(&marker, format!("{want}\n"));
 }
 
-/// Split a Ubisoft config `register` string into (key, value_name). The last
-/// backslash-separated segment is the value name; the rest is the key. Normalizes
-/// the full hive names to the short forms `reg add` expects.
+/// Identity of the embedded cert, used only to notice that it changed.
+fn cert_fingerprint(der: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    let mut h = Sha1::new();
+    h.update(der);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn parse_register(reg: &str) -> Option<(String, String)> {
     let reg = reg
         .replace("HKEY_LOCAL_MACHINE", "HKLM")
