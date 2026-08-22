@@ -376,6 +376,27 @@ pub fn working_dir(install_root: &Path, exe: &Path) -> PathBuf {
 }
 
 /// Convert a Linux path to the Wine drive-Z view (`/foo/bar` → `Z:\foo\bar`).
+
+/// Names of inherited environment variables that must not reach a child.
+///
+/// Anything `UBI_*` in our environment is meaningful to Ubisoft code: the real
+/// Connect client and the games both read them, so leaking ours into a Wine or
+/// Proton child lets the game see state it should not, and can make a title
+/// behave differently depending on how Optima happened to be started.
+fn ubi_vars_to_strip<I: IntoIterator<Item = String>>(names: I) -> Vec<String> {
+    names
+        .into_iter()
+        .filter(|n| n.to_ascii_uppercase().starts_with("UBI"))
+        .collect()
+}
+
+/// Remove every inherited `UBI_*` variable from a child's environment.
+fn scrub_ubi_env(cmd: &mut std::process::Command) {
+    for name in ubi_vars_to_strip(std::env::vars().map(|(k, _)| k)) {
+        cmd.env_remove(name);
+    }
+}
+
 fn wine_path(p: &Path) -> String {
     let s = p.to_string_lossy().replace('/', "\\");
     format!("Z:{s}")
@@ -448,6 +469,7 @@ fn reg_add_both(umu: &Path, proton: &Option<PathBuf>, prefix: &Path, key: &str, 
             .env("WINEPREFIX", prefix)
             .env("GAMEID", "0")
             .env("STORE", "none");
+        scrub_ubi_env(&mut cmd);
         if let Some(p) = proton {
             cmd.env("PROTONPATH", p);
         }
@@ -513,6 +535,7 @@ fn ensure_cert_trust(umu: &Path, proton: &Option<PathBuf>, prefix: &Path) {
                 .env("WINEPREFIX", prefix)
                 .env("GAMEID", "0")
                 .env("STORE", "none");
+            scrub_ubi_env(&mut del);
             if let Some(p) = proton {
                 del.env("PROTONPATH", p);
             }
@@ -528,6 +551,7 @@ fn ensure_cert_trust(umu: &Path, proton: &Option<PathBuf>, prefix: &Path) {
             .env("WINEPREFIX", prefix)
             .env("GAMEID", "0")
             .env("STORE", "none");
+        scrub_ubi_env(&mut cmd);
         if let Some(p) = proton {
             cmd.env("PROTONPATH", p);
         }
@@ -599,6 +623,7 @@ fn import_reg_seeds(
             .env("WINEPREFIX", prefix)
             .env("GAMEID", "0")
             .env("STORE", "none");
+        scrub_ubi_env(&mut cmd);
         if let Some(p) = proton {
             cmd.env("PROTONPATH", p);
         }
@@ -634,6 +659,7 @@ pub fn run_game(
         .env("WINEPREFIX", prefix)
         .env("GAMEID", "0")
         .env("STORE", "none");
+    scrub_ubi_env(&mut cmd);
     if let Some(p) = &proton {
         cmd.env("PROTONPATH", p);
     }
@@ -726,4 +752,34 @@ pub fn run_game(
         bail!("game exited with status {status}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ubi_vars_to_strip;
+
+    #[test]
+    fn strips_ubi_vars_case_insensitively() {
+        let env = vec![
+            "UBI_TOKEN".to_string(),
+            "ubi_session".to_string(),
+            "UbiServicesUrl".to_string(),
+            "UBISOFT_HOME".to_string(),
+            "PATH".to_string(),
+            "WINEPREFIX".to_string(),
+            "GAMEID".to_string(),
+            "SUBIDENTITY".to_string(), // contains "ubi" but does not start with it
+        ];
+        let mut got = ubi_vars_to_strip(env);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "UBISOFT_HOME".to_string(),
+                "UBI_TOKEN".to_string(),
+                "UbiServicesUrl".to_string(),
+                "ubi_session".to_string(),
+            ]
+        );
+    }
 }

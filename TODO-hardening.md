@@ -50,16 +50,23 @@ Each item below was checked against this tree before being listed.
 
 ## P3 — process environment hygiene
 
-- [ ] Wine/Proton children inherit the whole environment, including any `UBI_*`
+- [x] Wine/Proton children inherit the whole environment, including any `UBI_*`
       variables. Strip all case-insensitive `UBI_*` before spawning.
-      *Verified: no `env_remove`/`env_clear` anywhere in `launch.rs`.*
+      *Done 2026-08-22: `scrub_ubi_env()` at all 5 umu/Proton spawn sites,
+      matching `UBI*` case-insensitively. Unit test covers the case mix and
+      confirms `SUBIDENTITY` (contains "ubi", does not start with it) survives.*
 
 ## P4 — session store
 
-- [ ] Mode 0600 is applied with `set_permissions` *after* the file exists, so
+- [x] Mode 0600 is applied with `set_permissions` *after* the file exists, so
       there is a window where it is not. Create with the mode set, write to a
       temp file and rename, and check owner/type/`O_NOFOLLOW` on read.
-      *Verified: `config.rs:74,142,169`.*
+      *Done 2026-08-22: `write_private()` creates a temp file with mode 0600
+      already set, fills, fsyncs and renames over the target; `read_private()`
+      refuses symlinks, non-regular files and files owned by another uid. All
+      three writers (auth, profile, launch cache) and both secret readers go
+      through them. 3 unit tests; verified live — `whoami` still reads the real
+      session and `auth.toml` is 600.*
 
 ## P5 — auth (needs a live account to confirm)
 

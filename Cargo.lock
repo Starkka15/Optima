@@ -1018,6 +1018,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "futures",
+ "libc",
  "log",
  "open",
  "prost",
