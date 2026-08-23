@@ -87,7 +87,11 @@ Each item below was checked against this tree before being listed.
       `upgrade_captured_ticket()`, which yields the expiry and rememberMe
       ticket, falling back to storing the bare ticket if Ubisoft refuses.
       `whoami` no longer prints "(valid)" for a session with no expiry — it
-      says the expiry is unknown and whether refresh is even possible.*
+      says the expiry is unknown and whether refresh is even possible.
+      **PROVEN 2026-08-23 on a session that expired overnight by itself:**
+      whoami reported EXPIRED + live 401, `refresh` renewed it with no password
+      and no browser, whoami then returned 200. Before this fix that case
+      required a full `--local` re-login. Observed ticket lifetime ~3h.*
 
 ## P6 — throughput (only after the above)
 
