@@ -107,8 +107,7 @@ ported them the other way.
 Prompted by "we shouldn't be storing passwords".
 
 - [x] `profile.toml` held the account password in plaintext, and it was written
-      into `Uplay.ini` **and** `Uplay.toml` next to every game exe, where
-      backups, cloud saves and prefix copies pick it up.
+      into `Uplay.ini` **and** `Uplay.toml` next to every game exe.
       *The emu never checks it: the vendored Orbit emu ships
       `Password = "123456"` as its own default and just interns the string and
       hands the pointer to the game (`drm/orbit_r2/source/src/api.rs:31,381`).
