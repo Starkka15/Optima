@@ -870,7 +870,9 @@ async fn resolve_launch_online(
     // Real account data for the DRM shim. A paste-only login may not have stored
     // the profile id / name — fetch them from /v3/profiles/me (not DataDome-walled
     // with a valid ticket) and persist for next time.
-    let mut auth = config::load_auth()?.ok_or_else(|| anyhow::anyhow!("not logged in"))?;
+    // Launch has to renew like every other online path: tickets last ~3h, so
+    // starting a game a few hours after logging in was hitting a dead session.
+    let mut auth = load_auth_refreshing().await?;
     if auth.profile_id.is_empty() || auth.name_on_platform.is_empty() {
         if let Ok((st, body)) = auth::fetch_me(&auth).await {
             if st.is_success() {
