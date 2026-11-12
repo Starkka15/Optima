@@ -11,6 +11,7 @@
 mod auth;
 mod browser_login;
 mod config;
+mod connect;
 mod demux;
 mod install;
 mod launch;
@@ -70,8 +71,17 @@ enum Cmd {
         /// Install directory (default: ~/Games/optima/<product_id>).
         #[arg(long)]
         path: Option<String>,
+        /// Hash-check every file already on disk instead of trusting the
+        /// resume state (repairs a damaged install).
+        #[arg(long)]
+        verify: bool,
+        /// Only write Ubisoft Connect's install records (uplay_install.*) into
+        /// an existing install, without checking or downloading files.
+        #[arg(long)]
+        records_only: bool,
     },
-    /// Launch an installed, owned game under Proton with our Uplay R1 DRM shim.
+    /// Launch an installed, owned game through Ubisoft Connect (installed into
+    /// its own prefix on first use; sign in once when it asks).
     Launch {
         /// Product id of the game to launch (see `list-games`).
         product_id: u32,
@@ -82,6 +92,12 @@ enum Cmd {
         /// executable from the product configuration is used.
         #[arg(long)]
         exe: Option<String>,
+    },
+    /// Official Ubisoft Connect mode: install the client in its own prefix,
+    /// sign in once, and launch games through it instead of the shims.
+    Connect {
+        #[command(subcommand)]
+        cmd: ConnectCmd,
     },
     /// Launch a game's bundled settings/config application (e.g. Beyond Good &
     /// Evil's SettingsApplication.exe) in the same Proton prefix, so you can change
@@ -105,22 +121,63 @@ enum Cmd {
         /// Product id (see `list-games --all`).
         product_id: u32,
     },
-    /// Set or show the Uplay player profile (email / username / password) the emu
-    /// presents to games. Browser/ticket login can't capture these, so you set
-    /// them here (the Optima extension exposes the same fields as a form). Run
-    /// with no flags to print the current profile.
-    Profile {
-        #[arg(long)]
-        email: Option<String>,
-        #[arg(long)]
-        username: Option<String>,
-        #[arg(long)]
-        password: Option<String>,
-    },
     /// Show the stored session and live-verify it against UbiServices.
     Whoami,
     /// Renew the stored session from its rememberMe ticket (no password).
     Refresh,
+}
+
+#[derive(Subcommand)]
+enum ConnectCmd {
+    /// Download Ubisoft's installer and install Connect into its own prefix.
+    Setup,
+    /// Open the Connect window (sign in once here; tick "remember me").
+    Open,
+    /// Show whether Connect is installed and signed in, and its registered games.
+    Status,
+    /// Point Connect at an Optima install (done automatically on first launch).
+    Register {
+        product_id: u32,
+        /// Install directory (default: ~/Games/optima/<product_id>).
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Fallback step 1: open Connect's own install dialog for a product.
+    Install { product_id: u32 },
+    /// Fallback step 2: fill Connect's paused download from the Optima install.
+    Seed {
+        product_id: u32,
+        /// Optima install directory (default: ~/Games/optima/<product_id>).
+        #[arg(long)]
+        path: Option<String>,
+    },
+}
+
+fn default_install_dir(product_id: u32, path: Option<String>) -> std::path::PathBuf {
+    match path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => dirs::home_dir()
+            .unwrap_or_default()
+            .join("Games/optima")
+            .join(product_id.to_string()),
+    }
+}
+
+async fn do_connect(cmd: ConnectCmd) -> Result<()> {
+    match cmd {
+        ConnectCmd::Setup => connect::setup().await,
+        ConnectCmd::Open => connect::open(),
+        ConnectCmd::Status => connect::status(),
+        ConnectCmd::Register { product_id, path } => {
+            let dir = default_install_dir(product_id, path);
+            if !dir.is_dir() {
+                anyhow::bail!("{} does not exist", dir.display());
+            }
+            connect::register(&connect::prefix()?, product_id, &dir)
+        }
+        ConnectCmd::Install { product_id } => connect::install_dialog(product_id),
+        ConnectCmd::Seed { product_id, path } => connect::seed(product_id, &default_install_dir(product_id, path)),
+    }
 }
 
 #[tokio::main]
@@ -135,11 +192,11 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::ListGames { json } => do_list_games(json).await,
-        Cmd::Install { product_id, path } => do_install(product_id, path).await,
+        Cmd::Install { product_id, path, verify, records_only } => do_install(product_id, path, verify, records_only).await,
         Cmd::Launch { product_id, path, exe } => do_launch(product_id, path, exe).await,
+        Cmd::Connect { cmd } => do_connect(cmd).await,
         Cmd::Settings { product_id, path, exe } => do_settings(product_id, path, exe).await,
         Cmd::Config { product_id } => do_config(product_id).await,
-        Cmd::Profile { email, username, password } => do_profile(email, username, password),
         Cmd::Whoami => do_whoami().await,
         Cmd::Refresh => do_refresh().await,
     }
@@ -292,7 +349,7 @@ async fn do_list_games(json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn do_install(product_id: u32, path: Option<String>) -> Result<()> {
+async fn do_install(product_id: u32, path: Option<String>, verify: bool, records_only: bool) -> Result<()> {
     let (mut demux, mut ticket) = connect_demux().await?;
     let games = demux.owned_games().await?;
     let game = games
@@ -329,9 +386,14 @@ async fn do_install(product_id: u32, path: Option<String>) -> Result<()> {
     // each attempt makes forward progress.
     let mut attempt = 0;
     loop {
-        match install::install_game(&mut demux, &ticket, product_id, &manifest_id, &name, &dir).await {
+        match install::install_game(&mut demux, &ticket, product_id, &manifest_id, &name, &dir, verify && attempt == 0, records_only).await {
             Ok(()) => return Ok(()),
             Err(e) => {
+                // Out of space, not owned, unsupported codec: another run
+                // would fail the same way.
+                if e.downcast_ref::<install::Fatal>().is_some() {
+                    return Err(e);
+                }
                 attempt += 1;
                 if attempt > 30 {
                     return Err(e.context("install failed after 30 whole-run retries"));
@@ -497,72 +559,47 @@ fn first_executable(config: &str) -> Option<String> {
 async fn do_launch(product_id: u32, path: Option<String>, exe: Option<String>) -> Result<()> {
     // The install dir is fully local — resolve it before touching the network so
     // an offline launch never depends on Ubisoft.
-    let dir = match &path {
-        Some(p) => std::path::PathBuf::from(p),
-        None => dirs::home_dir()
-            .unwrap_or_default()
-            .join("Games/optima")
-            .join(product_id.to_string()),
-    };
+    let dir = default_install_dir(product_id, path);
     if !dir.exists() {
         anyhow::bail!("install dir {} does not exist — run `optima-cli install {product_id}` first", dir.display());
     }
 
-    // Ownership was proven the first time you launched online (we cached the real
-    // account + ticket then). Since the SP Uplay R1 DRM only reads the values we
-    // write into Uplay.ini — it never re-checks ownership over the network — a
-    // cached account lets you play fully offline, forever. So: try to refresh
-    // from Ubisoft (best effort), but fall back to the cache when the network is
-    // down or `OPTIMA_OFFLINE=1` is set. No aggressive per-launch online gate.
-    let forced_offline = std::env::var_os("OPTIMA_OFFLINE").is_some();
-    let mut cache: Option<config::LaunchCache> = None;
-    if forced_offline {
-        println!("[launch] OPTIMA_OFFLINE set — using cached account, skipping Ubisoft.");
-    } else {
-        match resolve_launch_online(product_id, exe.clone()).await {
-            Ok(c) => {
-                let _ = config::save_launch_cache(product_id, &c);
-                cache = Some(c);
-            }
-            Err(e) => {
-                println!("[launch] couldn't reach Ubisoft ({e}); falling back to cached account for offline play.");
-            }
+    // Ask Ubisoft whether the account owns the game and which exe it runs.
+    // Ownership itself is Connect's call when it starts the game; this is only
+    // a quick refusal for a definite "not owned", and the exe name lets Optima
+    // follow the game. Offline, the cached answer from the last launch is used.
+    let cache = match resolve_launch_online(product_id, exe.clone()).await {
+        Ok(c) => {
+            let _ = config::save_launch_cache(product_id, &c);
+            Some(c)
         }
-    }
-    let cache = match cache {
-        Some(c) => c,
-        None => config::load_launch_cache(product_id)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "no cached account for product {product_id} yet — launch it once while online \
-                 so Optima can cache your ownership ticket, then offline launches will work"
-            )
-        })?,
+        Err(e) if e.downcast_ref::<NotOwned>().is_some() => return Err(e),
+        Err(e) => {
+            println!("[launch] couldn't reach Ubisoft ({e}); using the cached game details");
+            config::load_launch_cache(product_id).ok().flatten()
+        }
     };
+    let name = cache.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| product_id.to_string());
 
     // An explicit --exe always wins over the cached path.
-    let exe_rel = exe.unwrap_or_else(|| cache.exe_rel.clone());
+    let exe_rel = exe.or_else(|| cache.as_ref().map(|c| c.exe_rel.clone())).unwrap_or_default();
     let mut exe_path = dir.join(exe_rel.replace('\\', std::path::MAIN_SEPARATOR_STR));
     if exe_rel.trim().is_empty() || !exe_path.exists() {
         let base = std::path::Path::new(&exe_rel)
             .file_name()
             .map(|f| f.to_owned())
             .unwrap_or_default();
-        // If we know the exe name, search for it by basename — the config's
-        // `executables.relative` sometimes omits the subdir the files land in (e.g.
-        // Splinter Cell Chaos Theory's exe is at System/splintercell3.exe but the
-        // config just says "splintercell3.exe"). If we DON'T know it (the config
-        // lists no relative exe — e.g. Watch_Dogs resolves it from a registry key),
-        // pick the main game exe by scanning the install dir.
+        // The config's `executables.relative` sometimes omits the subdir the
+        // files land in (Splinter Cell Chaos Theory: System/splintercell3.exe),
+        // and some configs list no relative exe at all (Watch_Dogs resolves it
+        // from a registry key), so search by name, else pick the main exe.
         let found = if base.is_empty() {
             find_main_exe(&dir)
         } else {
             find_exe_in(&dir, &base)
         };
         match found {
-            Some(found) => {
-                println!("[launch] resolved exe: {}", found.display());
-                exe_path = found;
-            }
+            Some(found) => exe_path = found,
             None => anyhow::bail!(
                 "could not find the game executable under {} (install incomplete?). \
                  Pass one with --exe <relative\\path.exe>.",
@@ -570,110 +607,37 @@ async fn do_launch(product_id: u32, path: Option<String>, exe: Option<String>) -
             ),
         }
     }
-    // DLLs load from the exe's own directory (folder-local search). Configs
-    // (Uplay.toml etc.) are read by the emu from the CWD, which is the install root
-    // for Ubisoft titles (Watch_Dogs' exe is in bin/ but runs from root) and the
-    // System/ dir for Unreal titles. For root-level exes all three coincide.
-    let run_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| dir.clone());
-    let cwd = launch::working_dir(&dir, &exe_path);
+    println!("[launch] {name}: {}", exe_path.display());
 
-    // The player identity the emu presents. Precedence: env override →
-    // stored profile (from `optima-cli profile set` / the extension form) →
-    // what we recovered from the account/cache. Username defaults to the real
-    // Ubisoft display name; email is synthesized only as a last resort so it's
-    // never blank; password is optional (unused offline).
-    let profile = config::load_profile().unwrap_or_default();
-    let username = first_nonempty([
-        std::env::var("OPTIMA_USERNAME").ok(),
-        Some(profile.username.clone()),
-        Some(cache.username.clone()),
-    ])
-    .unwrap_or_else(|| "Optima".to_string());
-    let email = first_nonempty([
-        std::env::var("OPTIMA_EMAIL").ok(),
-        Some(profile.email.clone()),
-        Some(cache.email.clone()),
-    ])
-    .unwrap_or_default();
-    let email = if email.trim().is_empty() { resolve_email(&username) } else { email };
-    // The emu never checks this, so no real password goes to disk or into the
-    // game folder. Overridable only for someone debugging the emu itself.
-    let password = std::env::var("OPTIMA_PASSWORD")
-        .unwrap_or_else(|_| config::EMU_PLACEHOLDER_PASSWORD.to_string());
-
-    let acct = launch::LaunchAccount {
-        user_id: cache.user_id.clone(),
-        username,
-        email,
-        password,
-        ticket: cache.ticket.clone(),
-        app_id: cache.app_id,
-        language: cache.language.clone(),
-    };
-
-    // Which Ubisoft DRM does this exe link against? AC4 & most SP titles import
-    // uplay_r1_loader.dll (flat UPLAY_*). AC3 & other early-Orbit AnvilNext titles
-    // import ubiorbitapi_r2_loader.dll (C++ OrbitClient) + upc_r1_loader.dll — a
-    // different emu. Detect from the exe so we deploy the matching loaders.
-    let drm = launch::detect_drm(&exe_path);
-    println!(
-        "[launch] preparing {}: DRM={:?}, writing config + deploying loaders...",
-        cache.name, drm
-    );
-    // Our complete emu reads Uplay.toml; keep the legacy Uplay.ini too (harmless,
-    // ignored by the new loader) so a fallback minimal loader would still work.
-    // upc_r1_loader.dll (Orbit R2 titles) is our R1 loader and reads Uplay.toml too.
-    // Everything goes next to the exe (run_dir) so the game loads its folder-local
-    // DLLs and reads the config from its own working dir.
-    // Write the emu configs to both the exe dir and the CWD (they differ only when
-    // the exe is in a subdir like bin/ — write both so the emu finds them whether
-    // it reads from its own dir or the working dir).
-    let mut config_dirs = vec![run_dir.clone()];
-    if cwd != run_dir {
-        config_dirs.push(cwd.clone());
+    // Ubisoft Connect runs the game. Optima only takes out what older builds
+    // left in the folder and adds the EAX audio shim for the titles that need
+    // it (BG&E, Splinter Cell), which comes out again when the game exits.
+    connect::setup().await?;
+    let mut dep = launch::Deployment::begin(&dir);
+    launch::clean_legacy_shims(&dir);
+    let exe_dir = exe_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| dir.clone());
+    if let Err(e) = launch::deploy_eax(&mut dep, &exe_dir, &exe_path) {
+        dep.restore();
+        return Err(e);
     }
-    for cd in &config_dirs {
-        launch::write_uplay_toml(cd, &acct, &cache.name)?;
-        launch::write_uplay_ini(cd, &acct)?;
-        // Orbit R2 titles additionally need Orbit.toml for ubiorbitapi_r2_loader.dll.
-        if drm == launch::Drm::OrbitR2 {
-            launch::write_orbit_toml(cd, &acct, &cache.name)?;
-        }
-    }
-    // DLLs load folder-local — deploy them next to the exe.
-    launch::deploy_loaders(&run_dir, drm)?;
-    // Old titles that demand Creative EAX (BG&E, Splinter Cell) — drop our shim.
-    launch::deploy_eax(&run_dir, &exe_path)?;
-
-    let prefix = config::data_dir()?.join("prefix");
-    // `-offline` is a title-SPECIFIC Uplay SP variant (AC4 accepts it) — but many
-    // games (e.g. Beyond Good & Evil) treat an unknown arg as a file to open and
-    // die with "unable to open file (-offline)". So run with NO extra args by
-    // default. For titles whose offline SP exe genuinely needs it, set
-    // OPTIMA_OFFLINE_ARG=1; or pass arbitrary args via OPTIMA_ARGS="a b c".
-    let args: Vec<String> = if let Some(a) = std::env::var_os("OPTIMA_ARGS") {
-        a.to_string_lossy().split_whitespace().map(String::from).collect()
-    } else if std::env::var_os("OPTIMA_OFFLINE_ARG").is_some() {
-        vec!["-offline".to_string()]
-    } else {
-        vec![]
-    };
-    let install_reg = (!cache.install_reg.is_empty()).then(|| cache.install_reg.clone());
-    launch::run_game(&dir, &exe_path, &prefix, product_id, &args, install_reg.as_deref())
+    let result = connect::launch_game(product_id, &dir, &exe_path);
+    finish_deployment(dep);
+    result
 }
 
-/// Launch a game's settings/config application in the same Proton prefix so the
-/// player can change resolution/graphics (many old titles boot tiny with no
-/// in-game video menu). No account/DRM setup needed — the settings app just reads
-/// and writes the game's registry/ini in the prefix, which the game then reads.
+/// Undo a launch's file changes, unless they were asked to stay for
+/// inspection (`OPTIMA_NO_RUN` dry runs, or `OPTIMA_KEEP_DEPLOY`). Anything kept
+/// is undone at the start of the next launch.
+fn finish_deployment(dep: launch::Deployment) {
+    if std::env::var_os("OPTIMA_NO_RUN").is_some() || std::env::var_os("OPTIMA_KEEP_DEPLOY").is_some() {
+        println!("[launch] leaving the deployed files in place until the next launch");
+    } else {
+        dep.restore();
+    }
+}
+
 async fn do_settings(product_id: u32, path: Option<String>, exe: Option<String>) -> Result<()> {
-    let dir = match &path {
-        Some(p) => std::path::PathBuf::from(p),
-        None => dirs::home_dir()
-            .unwrap_or_default()
-            .join("Games/optima")
-            .join(product_id.to_string()),
-    };
+    let dir = default_install_dir(product_id, path);
     if !dir.exists() {
         anyhow::bail!(
             "install dir {} does not exist — run `optima-cli install {product_id}` first",
@@ -681,21 +645,9 @@ async fn do_settings(product_id: u32, path: Option<String>, exe: Option<String>)
         );
     }
 
-    // Fetch the product config once (best-effort, offline-tolerant) — it names both
-    // the settings exe and the game's install-path registry key. If the fetch
-    // flakes (it hits the network), fall back to the install key cached by a prior
-    // launch so the settings app still gets its "properly installed" registry key.
+    // The product config names the settings exe (best effort: it needs the
+    // network, and a disk scan works without it).
     let cfg = resolve_product_config(product_id).await.ok();
-    let install_reg = cfg
-        .as_deref()
-        .and_then(install_register)
-        .or_else(|| {
-            config::load_launch_cache(product_id)
-                .ok()
-                .flatten()
-                .map(|c| c.install_reg)
-                .filter(|s| !s.is_empty())
-        });
 
     // Resolve the settings exe: explicit --exe wins; else the config's
     // `internal_name: Settings` exe; else a disk scan.
@@ -726,15 +678,17 @@ async fn do_settings(product_id: u32, path: Option<String>, exe: Option<String>)
     // The settings app itself needs the EAX shim (that's exactly what BG&E's
     // SettingsApplication.exe demands). Deploy it next to the settings exe.
     let settings_dir = settings_path.parent().unwrap_or(&dir);
-    launch::deploy_eax(settings_dir, &settings_path)?;
-
-    let prefix = config::data_dir()?.join("prefix");
-    println!("[settings] launching {} ...", settings_path.display());
-    // Reuse the game runner: it points the Ubisoft install registry (incl. the
-    // game's own install-path key, so the app doesn't bail "not properly
-    // installed") at the game, sets CWD to the exe's dir, and runs under the same
-    // prefix — so the settings app's writes land where the game reads them.
-    launch::run_game(&dir, &settings_path, &prefix, product_id, &[], install_reg.as_deref())
+    let mut dep = launch::Deployment::begin(&dir);
+    launch::clean_legacy_shims(&dir);
+    if let Err(e) = launch::deploy_eax(&mut dep, settings_dir, &settings_path) {
+        dep.restore();
+        return Err(e);
+    }
+    // Same prefix Connect runs the game in, so what the app writes is what the
+    // game reads.
+    let result = connect::run_tool(product_id, &dir, &settings_path);
+    finish_deployment(dep);
+    result
 }
 
 /// Fetch just the product `configuration` YAML for a product id (no launch cache).
@@ -837,151 +791,41 @@ fn find_settings_exe_on_disk(root: &std::path::Path) -> Option<std::path::PathBu
     matches.into_iter().min_by_key(|p| p.components().count())
 }
 
-/// Resolve the real account + ticket + launch exe from Ubisoft. Used to build
-/// (and refresh) the offline launch cache. Any failure here is non-fatal — the
-/// caller falls back to a previously cached account.
-async fn resolve_launch_online(
-    product_id: u32,
-    exe: Option<String>,
-) -> Result<config::LaunchCache> {
+/// Ubisoft's live answer that this account does not own the product. Unlike a
+/// network failure, it must not fall back to the offline launch cache.
+#[derive(Debug)]
+struct NotOwned(u32);
+
+impl std::fmt::Display for NotOwned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "product {} is not in your owned games", self.0)
+    }
+}
+
+impl std::error::Error for NotOwned {}
+
+async fn resolve_launch_online(product_id: u32, exe: Option<String>) -> Result<config::LaunchCache> {
     let (mut demux, _ticket) = connect_demux().await?;
     let games = demux.owned_games().await?;
     let game = games
         .iter()
         .find(|g| g.product_id == product_id && g.owned.unwrap_or(false))
-        .ok_or_else(|| anyhow::anyhow!("product {product_id} is not in your owned games"))?;
-
+        .ok_or_else(|| anyhow::Error::new(NotOwned(product_id)))?;
     let name = game
         .configuration
         .as_deref()
         .and_then(game_name)
         .unwrap_or_else(|| product_id.to_string());
     let config = game.configuration.clone().unwrap_or_default();
-    let uplay_id = game.uplay_id.unwrap_or(0);
-
-    // Some titles (e.g. Watch_Dogs) list NO `relative:` exe in the config — they
-    // resolve it from a registry key instead. Don't hard-fail: leave exe_rel empty
-    // and let do_launch scan the install dir for the main game exe.
+    // Some titles (e.g. Watch_Dogs) list NO `relative:` exe in the config; an
+    // empty exe_rel makes do_launch scan the install dir instead.
     let exe_rel = match exe {
         Some(e) => e,
         None => first_executable(&config).unwrap_or_default(),
     };
-
-    // Real account data for the DRM shim. A paste-only login may not have stored
-    // the profile id / name — fetch them from /v3/profiles/me (not DataDome-walled
-    // with a valid ticket) and persist for next time.
-    // Launch has to renew like every other online path: tickets last ~3h, so
-    // starting a game a few hours after logging in was hitting a dead session.
-    let mut auth = load_auth_refreshing().await?;
-    if auth.profile_id.is_empty() || auth.name_on_platform.is_empty() {
-        if let Ok((st, body)) = auth::fetch_me(&auth).await {
-            if st.is_success() {
-                if let Ok(j) = serde_json::from_str::<serde_json::Value>(&body) {
-                    if auth.profile_id.is_empty() {
-                        if let Some(p) = j.get("profileId").and_then(|x| x.as_str()) {
-                            auth.profile_id = p.to_string();
-                        }
-                    }
-                    if auth.name_on_platform.is_empty() {
-                        if let Some(n) = j.get("nameOnPlatform").and_then(|x| x.as_str()) {
-                            auth.name_on_platform = n.to_string();
-                        }
-                    }
-                    let _ = config::save_auth(&auth);
-                }
-            }
-        }
-    }
-    let user_id = auth.profile_id.clone();
-    let username = if auth.name_on_platform.is_empty() {
-        "Optima".to_string()
-    } else {
-        auth.name_on_platform.clone()
-    };
-    let ticket = if uplay_id != 0 {
-        match demux.get_uplay_pc_ticket(uplay_id).await {
-            Ok(Some(t)) => {
-                println!("[launch] got real uplay_pc_ticket ({} chars) for uplay_id {uplay_id}", t.len());
-                t
-            }
-            Ok(None) => {
-                println!("[launch] no uplay ticket returned; using a placeholder (SP DRM doesn't validate it)");
-                "OPTIMA".to_string()
-            }
-            Err(e) => {
-                println!("[launch] ticket fetch failed ({e}); using placeholder");
-                "OPTIMA".to_string()
-            }
-        }
-    } else {
-        println!("[launch] game has no uplay_id; using placeholder ticket");
-        "OPTIMA".to_string()
-    };
-
-    let email = resolve_email(&username);
-    Ok(config::LaunchCache {
-        user_id,
-        username,
-        email,
-        ticket,
-        app_id: uplay_id.max(product_id),
-        language: "en-US".to_string(),
-        exe_rel,
-        name,
-        install_reg: install_register(&config).unwrap_or_default(),
-    })
+    Ok(config::LaunchCache { exe_rel, name })
 }
 
-/// Extract the game's own install-path registry location from the product config
-/// (`working_directory.register`) — old titles read it to confirm the game is
-/// installed and to find their data. Returns the raw registry string.
-fn install_register(config: &str) -> Option<String> {
-    let v: serde_yaml::Value = serde_yaml::from_str(config).ok()?;
-    let mut found = None;
-    walk_for_register(&v, &mut found);
-    found
-}
-
-fn walk_for_register(v: &serde_yaml::Value, found: &mut Option<String>) {
-    if found.is_some() {
-        return;
-    }
-    match v {
-        serde_yaml::Value::Mapping(m) => {
-            // Prefer the register that IS the working directory (the install dir),
-            // not some other register in the config (e.g. Watch_Dogs also has an
-            // `…\Exe` register we must NOT treat as the install path).
-            if let Some(reg) = m.get(serde_yaml::Value::from("working_directory")) {
-                if let Some(s) = reg.get("register").and_then(|x| x.as_str()) {
-                    if s.to_uppercase().contains("HKEY") {
-                        *found = Some(s.to_string());
-                        return;
-                    }
-                }
-            }
-            for (_k, val) in m {
-                walk_for_register(val, found);
-            }
-        }
-        serde_yaml::Value::Sequence(seq) => {
-            for item in seq {
-                walk_for_register(item, found);
-            }
-        }
-        _ => {}
-    }
-}
-
-
-/// The Ubisoft account email isn't in the `/me` response and the ticket is an
-/// encrypted JWE, so we can't recover it after login. Games don't validate it in
-/// offline SP (Re0xCat's own sample ships a placeholder), but it must not be
-/// blank. Prefer an explicit `OPTIMA_EMAIL`; otherwise synthesize a stable,
-/// valid-format address from the account name.
-/// First option that is present and not blank (after trimming).
-fn first_nonempty<const N: usize>(opts: [Option<String>; N]) -> Option<String> {
-    opts.into_iter().flatten().find(|s| !s.trim().is_empty())
-}
 
 /// Recursively search `root` for a file named `base` (the exe basename). Used when
 /// the product config's `executables.relative` path doesn't match the actual
@@ -1051,17 +895,6 @@ fn find_main_exe(root: &std::path::Path) -> Option<std::path::PathBuf> {
     best.map(|(_, p)| p)
 }
 
-fn resolve_email(username: &str) -> String {
-    if let Ok(e) = std::env::var("OPTIMA_EMAIL") {
-        if !e.trim().is_empty() {
-            return e;
-        }
-    }
-    let handle: String = username.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    let handle = if handle.is_empty() { "player".to_string() } else { handle.to_lowercase() };
-    format!("{handle}@ubisoft.local")
-}
-
 async fn do_config(product_id: u32) -> Result<()> {
     let (mut demux, _ticket) = connect_demux().await?;
     let games = demux.owned_games().await?;
@@ -1075,40 +908,6 @@ async fn do_config(product_id: u32) -> Result<()> {
         }
         _ => println!("(product {product_id} has no inline configuration blob)"),
     }
-    Ok(())
-}
-
-fn do_profile(email: Option<String>, username: Option<String>, _password: Option<String>) -> Result<()> {
-    let mut p = config::load_profile().unwrap_or_default();
-    let mut changed = false;
-    if let Some(e) = email {
-        p.email = e;
-        changed = true;
-    }
-    if let Some(u) = username {
-        p.username = u;
-        changed = true;
-    }
-    if _password.is_some() {
-        println!(
-            "Note: --password is ignored and nothing is stored. The DRM emu never\n\
-             checks it, so Optima hands games a fixed placeholder instead."
-        );
-    }
-    if changed {
-        config::save_profile(&p)?;
-        println!("Profile saved.");
-    }
-    println!("Uplay player profile (fed to each game's Uplay.toml):");
-    println!(
-        "  email:    {}",
-        if p.email.is_empty() { "(unset — synthesized at launch)".to_string() } else { p.email.clone() }
-    );
-    println!(
-        "  username: {}",
-        if p.username.is_empty() { "(unset — uses Ubisoft display name)".to_string() } else { p.username.clone() }
-    );
-    println!("  password: not stored (the emu is given a fixed placeholder)");
     Ok(())
 }
 

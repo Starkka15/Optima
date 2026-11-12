@@ -35,8 +35,6 @@ struct SessionResponse {
     #[serde(default)]
     session_id: String,
     #[serde(default)]
-    session_key: String,
-    #[serde(default)]
     profile_id: String,
     #[serde(default)]
     user_id: String,
@@ -68,7 +66,6 @@ fn to_auth(r: SessionResponse) -> Auth {
     Auth {
         ticket: r.ticket,
         session_id: r.session_id,
-        session_key: r.session_key,
         profile_id: r.profile_id,
         user_id: r.user_id,
         name_on_platform: r.name_on_platform,

@@ -17,8 +17,6 @@ use std::path::{Path, PathBuf};
 pub struct Auth {
     pub ticket: String,
     pub session_id: String,
-    #[serde(default)]
-    pub session_key: String,
     pub profile_id: String,
     #[serde(default)]
     pub user_id: String,
@@ -140,101 +138,18 @@ pub fn load_auth() -> Result<Option<Auth>> {
     Ok(Some(auth))
 }
 
-/// Everything a launch needs, cached per product so an owned game can be started
-/// **offline** (no Ubisoft round-trip). The SP Uplay R1 DRM never validates the
-/// ticket online — it only reads the values we write into `Uplay.ini` — so a
-/// cached ticket is sufficient forever for offline single-player. We still
-/// refresh this on any launch that DOES reach the network.
+/// What a launch needs to know about a game when Ubisoft can't be reached:
+/// which exe to look for and what to call it. Refreshed on every online launch.
+/// (Files from older builds also carry an account ticket for the old DRM shim;
+/// unknown fields are ignored, and the next save drops them.)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LaunchCache {
-    pub user_id: String,
-    pub username: String,
-    #[serde(default)]
-    pub email: String,
-    pub ticket: String,
-    pub app_id: u32,
-    pub language: String,
     /// Backslash-form exe path relative to the install dir (e.g. `AC4BFSP.exe`).
+    #[serde(default)]
     pub exe_rel: String,
     /// Human-readable game name (for log lines).
+    #[serde(default)]
     pub name: String,
-    /// The game's own install-path registry location, verbatim from the product
-    /// config's `working_directory.register` (e.g.
-    /// `HKEY_LOCAL_MACHINE\SOFTWARE\Ubisoft\Beyond Good & Evil\Install path`). Old
-    /// settings apps / games read this to confirm the game is "properly installed"
-    /// and to find their data. Set at launch so they don't bail. Empty if unknown.
-    #[serde(default)]
-    pub install_reg: String,
-}
-
-/// The account identity the Uplay R1 emu presents to games. Browser/ticket login
-/// never yields these (the ticket carries no display email), so the user supplies
-/// them once — via `optima-cli profile set` on desktop, or the Optima extension's
-/// account form on the Ally. Written into each game's `Uplay.toml` at launch.
-/// None of it is validated online for offline SP; it's the local player identity.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Profile {
-    /// Shown to some games. Optional: synthesised from the username when unset,
-    /// so nobody has to hand over a real address to play offline.
-    #[serde(default)]
-    pub email: String,
-    #[serde(default)]
-    pub username: String,
-}
-
-/// What the DRM emu is handed as the account password.
-///
-/// It is never checked against anything: the vendored Orbit emu ships
-/// `Password = "123456"` as its own default and just interns the string and
-/// passes the pointer to the game. Storing a real password bought nothing and
-/// put it in plaintext in `profile.toml` **and** in `Uplay.ini` next to every
-/// game exe, where backups and cloud saves pick it up.
-pub const EMU_PLACEHOLDER_PASSWORD: &str = "optima";
-
-impl Profile {
-    /// An address to show the game. Never a real one unless the user set it.
-    pub fn display_email(&self) -> String {
-        if !self.email.trim().is_empty() {
-            return self.email.clone();
-        }
-        let user = if self.username.trim().is_empty() { "player" } else { self.username.trim() };
-        format!("{user}@optima.local")
-    }
-}
-
-fn profile_path() -> Result<PathBuf> {
-    Ok(data_dir()?.join("profile.toml"))
-}
-
-pub fn save_profile(p: &Profile) -> Result<()> {
-    let path = profile_path()?;
-    let body = toml::to_string_pretty(p).context("serializing profile")?;
-    write_private(&path, &body)
-}
-
-pub fn load_profile() -> Result<Profile> {
-    let path = profile_path()?;
-    // Older versions stored the account password here in plaintext. Remove it
-    // on sight rather than waiting for the next save.
-    if path.exists() {
-        if let Ok(raw) = read_private(&path) {
-            if raw.lines().any(|l| l.trim_start().starts_with("password")) {
-                if let Ok(p) = toml::from_str::<Profile>(&raw) {
-                    if write_private(&path, &toml::to_string_pretty(&p)?).is_ok() {
-                        eprintln!(
-                            "[profile] removed the stored password from {} — it was never needed",
-                            path.display()
-                        );
-                    }
-                }
-            }
-        }
-    }
-    if !path.exists() {
-        return Ok(Profile::default());
-    }
-    let body = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(toml::from_str(&body).context("parsing profile.toml")?)
 }
 
 fn launch_cache_path(product_id: u32) -> Result<PathBuf> {

@@ -1,14 +1,15 @@
 # Optima
 
-**An ownership-backed Ubisoft Connect client for Linux.** Optima logs into *your*
+**An ownership-backed Ubisoft Connect driver for Linux.** Optima logs into *your*
 Ubisoft account, lists the games *you own*, downloads them from Ubisoft's *own*
-CDN, and launches them under Proton — no Ubisoft Connect launcher required. It's
-the Ubisoft analog of a Linux-friendly store client, built for the interop /
-Steam Deck & handheld case.
+CDN, and launches them through the **official Ubisoft Connect client** under
+Proton. It's the Ubisoft analog of a Linux-friendly store client, built for the
+interop / Steam Deck & handheld case.
 
 It talks to Ubisoft's real services with your real credentials and your real
-entitlements. Think of it as a headless, scriptable replacement for the Ubisoft
-Connect PC app on a platform Ubisoft doesn't ship one for.
+entitlements. Optima does the parts Connect can't do headless (game list,
+downloads with progress, resume) and leaves sign-in, ownership, DRM and launch to
+Ubisoft's own client.
 
 ## What this is — and what it is NOT
 
@@ -23,11 +24,10 @@ games you actually own:
   "unlock everything" mode.
 - **Downloads come from Ubisoft's CDN**, using download tokens Ubisoft issues to
   your session. Optima hosts no game data and redistributes nothing.
-- **It does NOT crack DRM.** It does not defeat Denuvo or any modern anti-tamper;
-  Denuvo-wrapped titles are explicitly out of scope. What it *does* provide is a
-  minimal **Uplay R1 compatibility shim** so that older single-player titles
-  which expect the Ubisoft Connect overlay to be present will boot offline once
-  you already own and have downloaded them (see [DRM shim](#drm-shim) below).
+- **It does not touch DRM.** Games are started by the official Ubisoft Connect
+  client, which does its own ownership and DRM checks exactly as on Windows.
+  Optima ships no DRM replacement (earlier versions did; see
+  [Launching](#launching-through-ubisoft-connect)).
 
 If you don't own a game, Optima can't list it, can't download it, and won't
 launch it. That's the whole point.
@@ -41,9 +41,13 @@ Only requests to **Ubisoft's own endpoints**:
 - `*.cdn.ubi.com` / `uplaypc-s-ubisoft.cdn.ubi.com` — game files
 - `connect.ubisoft.com` / `ubistatic*.ubisoft.com` — the WebAuth SDK used for the
   browser login
+- `static3.cdn.ubi.com` — the official Ubisoft Connect installer
+
+The Ubisoft Connect client itself, once installed, talks to Ubisoft as it does
+on Windows.
 
 There is **no Optima server**, no telemetry, no third party. Your session ticket
-and account profile are stored locally in `~/.local/share/optima/` (mode `0600`)
+is stored locally in `~/.local/share/optima/` (mode `0600`)
 and never sent anywhere except Ubisoft. Read the source — it's all here.
 
 ## How it works
@@ -52,57 +56,42 @@ and never sent anywhere except Ubisoft. Read the source — it's all here.
 |-------|--------------|
 | **Auth** | `optima-cli login --local` hosts a tiny local HTTPS page that embeds Ubisoft's official **WebAuth SDK** and captures a `ubi_v1` session ticket the same way the web login does. Works in any browser, no devtools. Renewed silently via the rememberMe ticket. |
 | **Library** | The Demux ownership service returns your owned products (each with an embedded configuration blob: real title, launch exe, Uplay app id). |
-| **Download** | An ownership token → a download-service session → signed CDN URLs. Manifests and slices are fetched, decompressed, and written to disk, with resume + reconnect for large titles. |
-| **Launch** | Optima writes the Uplay config, deploys the R1 shim into the game folder, seeds the required registry keys, and runs the game exe under Proton (via `umu`). |
+| **Download** | An ownership token → a download-service session → signed CDN URLs. Manifests and slices are fetched, decompressed, verified and written to disk, with resume + reconnect for large titles. At the end Optima writes Connect's own install records (`uplay_install.manifest`, `uplay_install.state`) so the official client sees the game as installed. |
+| **Launch** | The official Ubisoft Connect client (installed once into its own Proton prefix) starts the game through its `uplay://launch/<id>/0` handler. Optima registers the install with it first, including the registry keys the game's installer would set. |
 
 The protobuf wire formats were reverse-engineered by the
 [YoobieRE](https://github.com/YoobieRE) project (Optima's `proto/` schemas derive
 from their work); Optima is an independent Rust reimplementation of the client.
 
-## DRM shims
+## Launching through Ubisoft Connect
 
-Older Ubisoft single-player titles load a folder-local Ubisoft loader DLL and
-expect it to answer a small set of ownership/overlay calls. Optima ships
-compatibility shims that answer those calls for a game **you own and have already
-downloaded**, so it boots without the Ubisoft Connect launcher running. They do
-**not** bypass any cryptographic license check and do nothing for titles you
-don't own. `optima-cli launch` auto-detects which shim a game needs from its exe
-imports and deploys the matching one:
+The first launch installs Ubisoft Connect from Ubisoft's CDN into
+`~/.local/share/optima/connect-prefix` (with the fonts and D3D compiler it
+needs, and its overlay off) and asks you to sign in to it once. After that,
+`optima-cli launch` registers the game with Connect and has Connect start it;
+Optima stays running until the game exits, then closes Connect. Connect's own
+offline mode works as usual.
 
-- **Uplay R1** (`uplay_r1_loader.dll`, flat `UPLAY_*` C API) — e.g. AC4 Black Flag.
-  Built from **[Re0xCat/uplay-r1-loader](https://github.com/Re0xCat/uplay-r1-loader)**;
-  prebuilt DLLs in `drm/uplay_r1/`. Games that import `upc_r1_loader.dll` (same API)
-  get a copy of this one under that name.
-- **Orbit R2** (`ubiorbitapi_r2_loader.dll`, the C++ `OrbitClient` class) — e.g.
-  Assassin's Creed III. Vendored (with fixes) in `drm/orbit_r2/source/`, prebuilt
-  DLL in `drm/orbit_r2/`. Based on
-  [Re0xCat/ubiorbitapi-r2-loader](https://github.com/Re0xCat/ubiorbitapi-r2-loader),
-  with a corrected `__thiscall` invocation (the listener callbacks were reaching
-  the game with a null `this`) and asynchronous callback delivery from `Update()`.
-- **EAX** (`eax.dll`) — classic titles (Beyond Good & Evil, Splinter Cell) demand
-  Creative EAX, which doesn't exist under Proton. Our shim (source in `drm/eax/`)
-  forwards `EAXDirectSoundCreate8` to plain DirectSound so the check passes.
-
-All shims are embedded into `optima-cli` at compile time (via `include_bytes!`),
-so a normal `cargo build` works without a Windows cross-toolchain. To rebuild and
-verify them yourself:
+The one thing Optima still puts in a game folder is an **EAX** shim (`eax.dll`,
+source in `drm/eax/`): classic titles (Beyond Good & Evil, Splinter Cell) demand
+Creative EAX, which doesn't exist under Proton, so the shim forwards
+`EAXDirectSoundCreate8` to plain DirectSound. It is an audio fix, not DRM, and
+it is taken out again when the game exits. Rebuild it with:
 
 ```bash
-# Uplay R1 (mingw):
-git clone https://github.com/Re0xCat/uplay-r1-loader && cd uplay-r1-loader
-cargo build --release --target i686-pc-windows-gnu     # -> loader.dll (32-bit)
-cargo build --release --target x86_64-pc-windows-gnu   # -> loader.dll (64-bit)
-# copy over drm/uplay_r1/uplay_r1_loader{,64}.dll
-
-# Orbit R2 (MSVC target via cargo-xwin — the C++ ABI needs MSVC):
-cargo install cargo-xwin
-cd drm/orbit_r2/source
-XWIN_ARCH="x86,x86_64" cargo xwin build --release --target i686-pc-windows-msvc
-# copy target/i686-pc-windows-msvc/release/ubiorbitapi_r2_loader.dll to drm/orbit_r2/
-
-# EAX (mingw):
 cd drm/eax && i686-w64-mingw32-gcc -shared -O2 -o eax.dll eax_stub.c eax.def -static-libgcc
 ```
+
+Earlier versions launched games without Connect by replacing Ubisoft's loader
+DLLs with compatibility shims. Those are gone; on first launch Optima removes
+anything they left in a game folder and puts the game's own DLLs back.
+`drm/signing/optima-signing.cer` remains only so those old files can be
+recognized.
+
+The approach (official client in its own prefix, seeding a folder Connect will
+accept) follows research by
+[xXJSONDeruloXx/ubi-cli-mvp](https://github.com/xXJSONDeruloXx/ubi-cli-mvp); the
+install-state layout comes from [UplayDB/Protobufs](https://github.com/UplayDB/Protobufs).
 
 ## Building
 
@@ -128,9 +117,9 @@ cargo build --release --target x86_64-unknown-linux-musl
 optima-cli login --local              # sign in (browser, one time)
 optima-cli list-games                 # your owned, installable games
 optima-cli install <product_id>       # download from Ubisoft's CDN
-optima-cli launch <product_id>        # run under Proton
+optima-cli launch <product_id>        # start it through Ubisoft Connect
 optima-cli settings <product_id>      # run a game's settings/config app (resolution, etc.)
-optima-cli profile --email … --username … --password …   # local Uplay profile
+optima-cli connect status             # Connect installed / signed in / registered games
 optima-cli whoami                     # show + verify the stored session
 ```
 
@@ -147,10 +136,13 @@ gives you a Game-Mode UI to log in, install, and launch — no desktop mode.
 
 - [YoobieRE](https://github.com/YoobieRE) — Ubisoft Demux / manifest / install
   protocol reversing (the basis for `proto/`)
-- [Re0xCat/uplay-r1-loader](https://github.com/Re0xCat/uplay-r1-loader) — the
-  Uplay R1 compatibility shim
-- [Re0xCat/ubiorbitapi-r2-loader](https://github.com/Re0xCat/ubiorbitapi-r2-loader)
-  — the basis for the Orbit R2 shim (vendored + fixed in `drm/orbit_r2/source/`)
+- [xXJSONDeruloXx/ubi-cli-mvp](https://github.com/xXJSONDeruloXx/ubi-cli-mvp) —
+  the official-Connect launch research and the hardening review
+- [UplayDB/Protobufs](https://github.com/UplayDB/Protobufs) — Connect's
+  `uplay_install.state` layout
+- [Re0xCat/uplay-r1-loader](https://github.com/Re0xCat/uplay-r1-loader) and
+  [Re0xCat/ubiorbitapi-r2-loader](https://github.com/Re0xCat/ubiorbitapi-r2-loader)
+  — the compatibility shims earlier versions used
 - [Open-Wine-Components/umu-launcher](https://github.com/Open-Wine-Components/umu-launcher)
   — the Proton runtime launcher
 

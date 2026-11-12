@@ -1,0 +1,39 @@
+// Ubisoft Connect's per-game install record, `uplay_install.state`, which it
+// keeps next to `uplay_install.manifest` in every installed game's folder.
+// Field numbers and types follow UplayDB/Protobufs (dumped from Connect
+// 175.0.0.13393, 2026-10-31); only the fields Optima writes are declared, and
+// protobuf skips unknown ones, so this stays wire-compatible.
+syntax = "proto2";
+
+package mg.protocol.download_install_state;
+
+message License {
+    required string identifier = 1;
+    required uint32 version = 2;
+}
+
+message Chunk {
+    required uint32 chunk_id = 1;
+    required bool is_required = 2;
+    required bool is_downloaded = 3;
+    optional string language = 4;
+    optional uint32 uplay_id = 5;
+    optional string tags = 6;
+    repeated uint32 uplay_ids = 7;
+}
+
+message DownloadInstallState {
+    optional string manifest_sha1 = 1;
+    optional uint32 version = 2;
+    optional string selected_language = 3;
+    repeated License licenses = 4;
+    repeated Chunk chunks = 6;
+    optional string shortcut_name = 11;
+    repeated string languages = 17;
+    optional bool patch_required = 19;
+    optional string game_name = 22;
+    optional string game_version = 25;
+    repeated string installed_languages = 26;
+    optional uint32 uplay_id = 28;
+    optional uint64 install_date = 32;
+}

@@ -28,8 +28,11 @@ const CLIENT_ID: &str = "uplay_pc";
 /// Ubisoft Connect launcher build number reported to demux (the 4th component of
 /// the launcher version, e.g. 172.1.0.**13247**). MUST be sent first on a fresh
 /// socket, and must be recent enough or the server replies ClientOutdatedPush
-/// and drops the connection. Bump this to the current launcher build over time.
+/// and drops the connection. Only a fallback now: `connect` asks the patch
+/// service for the current build first (see `negotiate_version`).
 const API_VERSION: u32 = 13247;
+/// The launcher's patch track; its `latest_version` is the build to report.
+const PATCH_TRACK: &str = "DPR";
 
 pub struct Demux {
     tls: TlsStream<TcpStream>,
@@ -39,6 +42,36 @@ pub struct Demux {
 impl Demux {
     /// TLS-connect and authenticate with a `ubi_v1` ticket.
     pub async fn connect(ticket: &str) -> Result<Self> {
+        let mut demux = Self::open_socket().await?;
+        // Report the launcher build the patch service says is current, so a
+        // hard-coded number going stale cannot lock Optima out. If the server
+        // will not answer that, start over on a fresh socket with the constant.
+        let version = match std::env::var("OPTIMA_DEMUX_VERSION").ok().and_then(|v| v.parse().ok()) {
+            Some(v) => v,
+            None => match tokio::time::timeout(std::time::Duration::from_secs(5), demux.negotiate_version()).await
+            {
+                Ok(Ok(v)) => v,
+                outcome => {
+                    if std::env::var_os("OPTIMA_DEBUG").is_some() {
+                        let why = match outcome {
+                            Ok(Err(e)) => e.to_string(),
+                            _ => "timed out".to_string(),
+                        };
+                        eprintln!("[demux] patch info unavailable ({why}); reporting build {API_VERSION}");
+                    }
+                    demux = Self::open_socket().await?;
+                    API_VERSION
+                }
+            },
+        };
+        // The client version push must precede authentication; without it the
+        // server drops the connection on our next frame.
+        demux.send_client_version(version).await?;
+        demux.authenticate(ticket).await?;
+        Ok(demux)
+    }
+
+    async fn open_socket() -> Result<Self> {
         // Ensure a rustls crypto provider is installed (ring).
         let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -57,15 +90,37 @@ impl Demux {
             .to_owned();
         let tls = connector.connect(server_name, tcp).await.context("TLS handshake")?;
 
-        let mut demux = Demux {
+        Ok(Demux {
             tls,
             next_request_id: 1,
+        })
+    }
+
+    /// Ask the patch service for the launcher's current build number.
+    async fn negotiate_version(&mut self) -> Result<u32> {
+        let id = self.request_id();
+        let up = demux::Upstream {
+            request: Some(demux::Req {
+                request_id: id,
+                get_patch_info_req: Some(demux::GetPatchInfoReq {
+                    patch_track_id: PATCH_TRACK.to_string(),
+                    test_config: false,
+                    track_type: Some(0),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
         };
-        // Mandatory first message: the client version handshake (fire-and-forget
-        // push). Without it the server drops the connection on our next frame.
-        demux.send_client_version().await?;
-        demux.authenticate(ticket).await?;
-        Ok(demux)
+        self.write_upstream(&up).await?;
+        let rsp = self.read_response(id).await?;
+        let info = rsp.get_patch_info_rsp.ok_or_else(|| anyhow!("no patch info in the response"))?;
+        if !info.success || info.latest_version == 0 {
+            bail!("patch service declined (success={})", info.success);
+        }
+        if std::env::var_os("OPTIMA_DEBUG").is_some() {
+            eprintln!("[demux] patch service reports launcher build {}", info.latest_version);
+        }
+        Ok(info.latest_version)
     }
 
     fn request_id(&mut self) -> u32 {
@@ -115,12 +170,10 @@ impl Demux {
         bail!("no response for request {request_id} after 32 frames")
     }
 
-    async fn send_client_version(&mut self) -> Result<()> {
+    async fn send_client_version(&mut self, version: u32) -> Result<()> {
         let up = demux::Upstream {
             push: Some(demux::Push {
-                client_version: Some(demux::ClientVersionPush {
-                    version: API_VERSION,
-                }),
+                client_version: Some(demux::ClientVersionPush { version }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -284,42 +337,6 @@ impl Demux {
             .filter(|m| !m.is_empty()))
     }
 
-    /// Fetch a real `uplay_pc_ticket` for a game (by its uplay_id) — the token
-    /// the Uplay SDK hands the game. Backs our reimplemented loader's
-    /// `UPLAY_USER_GetTicketUtf8` so launches are ownership-backed, not spoofed.
-    pub async fn get_uplay_pc_ticket(&mut self, uplay_id: u32) -> Result<Option<String>> {
-        let conn = self.open_connection("ownership_service").await?;
-        let init = ownership::Upstream {
-            request: Some(ownership::Req {
-                request_id: 1,
-                initialize_req: Some(ownership::InitializeReq {
-                    get_associations: Some(true),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-        };
-        let _ = self.service_roundtrip(conn, init.encode_to_vec()).await?;
-
-        let up = ownership::Upstream {
-            request: Some(ownership::Req {
-                request_id: 2,
-                get_uplay_pc_ticket_req: Some(ownership::GetUplayPcTicketReq {
-                    uplay_id,
-                    platform: None,
-                }),
-                ..Default::default()
-            }),
-        };
-        let raw = self.service_roundtrip(conn, up.encode_to_vec()).await?;
-        let down = ownership::Downstream::decode(&raw[..]).context("decoding uplay ticket rsp")?;
-        Ok(down
-            .response
-            .and_then(|r| r.get_uplay_pc_ticket_rsp)
-            .filter(|t| t.success)
-            .and_then(|t| t.uplay_pc_ticket))
-    }
-
     /// Batch-resolve manifests for many products in a SINGLE ownership call.
     /// Returns only the ids that have a real Ubisoft CDN build (a non-empty
     /// manifest) — Steam-linked / delisted copies come back `ServerError` and are
@@ -398,5 +415,18 @@ impl Demux {
             bail!("ownership initialize returned success=false");
         }
         Ok(init.owned_games.map(|g| g.owned_games).unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Live, anonymous: `cargo test -- --ignored patch_service`.
+    #[tokio::test]
+    #[ignore]
+    async fn patch_service_reports_a_build() {
+        let mut d = super::Demux::open_socket().await.unwrap();
+        let v = d.negotiate_version().await.unwrap();
+        println!("launcher build {v}");
+        assert!(v >= super::API_VERSION);
     }
 }

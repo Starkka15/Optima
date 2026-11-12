@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Starkka15
 
-//! User-friendly unified login. One local page, one browser session, everything
-//! captured in the right order:
-//!   1. Our own form collects a **display email** — the one value Ubisoft's
-//!      cross-origin login never exposes to us, and that the Uplay emu needs for
-//!      each game's `Uplay.toml`. Stored to `profile.toml`.
-//!   2. We embed Ubisoft's official **WebAuth SDK** (`connectSdkPublic.js`) and
+//! User-friendly unified login. One local page, one browser session:
+//!   1. We embed Ubisoft's official **WebAuth SDK** (`connectSdkPublic.js`) and
 //!      call `getTicket()`. The SDK's hidden `sdk.html` iframe (on
 //!      connect.ubisoft.com) is the only thing that can read the SSO session and
 //!      hand back a ticket. That iframe's storage is normally blocked as a
@@ -18,9 +14,10 @@
 //!      mode. First launch the user signs in via a popup (`logged-in.html`,
 //!      the only whitelisted nextUrl); after that the stored SSO session +
 //!      rememberMe refresh keep it silent.
-//!   3. With the ticket we fetch `/v3/profiles/me` and fill in the **username**
+//!   2. With the ticket we fetch `/v3/profiles/me` and fill in the **username**
 //!      (`nameOnPlatform`) automatically — the user never types it.
-//! OPTIMA_DEBUG logs each request.
+//!
+//! OPTIMA_DEBUG logs each request's method and path.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -52,8 +49,6 @@ const SDK_URL: &str =
 enum Action {
     /// Served a page (form or the /back bounce). Keep listening.
     Served,
-    /// The form posted a display email. No password: the emu never checks one.
-    Profile { email: String },
     /// Ubisoft redirected back with the ticket.
     Ticket(String),
 }
@@ -122,7 +117,7 @@ pub async fn run() -> Result<()> {
         urlencode(&logged_in)
     );
 
-    // Open OUR page first (the display-email form), not Ubisoft directly — and
+    // Open OUR page (it hosts the SDK), not Ubisoft directly — and
     // via the localhost.ubisoft.com name so the SDK iframe is same-site with us.
     let start = format!("https://{HOST}:{PORT}/");
     if let Ok(browser) = std::env::var("BROWSER") {
@@ -136,8 +131,12 @@ pub async fn run() -> Result<()> {
     println!("First time: the browser warns about a self-signed certificate — click Advanced → proceed. It's your own local server.");
     println!("Step 1 saves your account locally (for your games); Step 2 is the real Ubisoft sign-in.");
 
-    let mut ticket: Option<String> = None;
-    loop {
+    // Per-run secret baked into our page. Any other site can make the browser
+    // POST to this port, but it cannot read our page to learn this, so a ticket
+    // or email it pushes in (a login-CSRF into someone else's account) is refused.
+    let state = uuid::Uuid::new_v4().simple().to_string();
+
+    let ticket = loop {
         let (socket, _) = listener.accept().await?;
         let mut socket = match acceptor.accept(socket).await {
             Ok(s) => s,
@@ -148,24 +147,12 @@ pub async fn run() -> Result<()> {
                 continue;
             }
         };
-        match handle(&mut socket, &login_url).await? {
+        match handle(&mut socket, &login_url, &state).await? {
             Action::Served => {}
-            Action::Profile { email } => {
-                let mut p = config::load_profile().unwrap_or_default();
-                p.email = email;
-                config::save_profile(&p)?;
-                if std::env::var_os("OPTIMA_DEBUG").is_some() {
-                    eprintln!("[profile] stored display email");
-                }
-            }
-            Action::Ticket(t) => {
-                ticket = Some(t);
-                break;
-            }
+            Action::Ticket(t) => break t,
         }
-    }
+    };
 
-    let ticket = ticket.expect("loop only breaks with a ticket");
     println!("[login] ticket captured ({} chars) — resolving your profile…", ticket.len());
     let mut auth = Auth {
         ticket,
@@ -195,9 +182,6 @@ pub async fn run() -> Result<()> {
             if let Ok(j) = serde_json::from_str::<serde_json::Value>(&body) {
                 if let Some(n) = j.get("nameOnPlatform").and_then(|x| x.as_str()) {
                     auth.name_on_platform = n.to_string();
-                    let mut p = config::load_profile().unwrap_or_default();
-                    p.username = n.to_string();
-                    let _ = config::save_profile(&p);
                 }
                 if let Some(id) = j.get("profileId").and_then(|x| x.as_str()) {
                     auth.profile_id = id.to_string();
@@ -221,7 +205,26 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-async fn handle<S>(socket: &mut S, login_url: &str) -> Result<Action>
+/// A POST is ours only if it comes from our own page: the browser-set
+/// `Origin` must be this server and the body must echo this run's `state`.
+fn post_is_ours(head: &str, body: &str, state: &str) -> bool {
+    let want_origin = format!("https://{HOST}:{PORT}");
+    let origin_ok = head
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split_once(':'))
+        .any(|(k, v)| k.trim().eq_ignore_ascii_case("origin") && v.trim() == want_origin);
+    origin_ok && form_field(body, "state").as_deref() == Some(state)
+}
+
+fn form_field(body: &str, key: &str) -> Option<String> {
+    body.split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| urldecode(v))
+}
+
+async fn handle<S>(socket: &mut S, login_url: &str, state: &str) -> Result<Action>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -254,41 +257,24 @@ where
     }
     let req = String::from_utf8_lossy(&data);
     let line = req.lines().next().unwrap_or("");
-    if std::env::var_os("OPTIMA_DEBUG").is_some() {
-        eprintln!("[login] {line}");
-    }
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or("GET");
     let path_and_query = parts.next().unwrap_or("/");
     let path = path_and_query.split('?').next().unwrap_or("/");
-
-    // POST /profile — the form submitting the display email.
-    if method == "POST" && path == "/profile" {
-        let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-        let mut email = String::new();
-        for pair in body.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                match k {
-                    "email" => email = urldecode(v),
-                    _ => {}
-                }
-            }
-        }
-        send(socket, "200 OK", "text/plain", "ok").await;
-        return Ok(Action::Profile { email });
+    // Path only: the query of /back can carry the ticket itself.
+    if std::env::var_os("OPTIMA_DEBUG").is_some() {
+        eprintln!("[login] {method} {path}");
+    }
+    let (head, body) = req.split_once("\r\n\r\n").unwrap_or((&req, ""));
+    if method == "POST" && !post_is_ours(head, body, state) {
+        eprintln!("[login] refused a {path} POST that did not come from the Optima page");
+        send(socket, "403 Forbidden", "text/plain", "forbidden").await;
+        return Ok(Action::Served);
     }
 
     // POST /ticket — the SDK page delivering the captured ticket (primary path).
     if method == "POST" && path == "/ticket" {
-        let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-        let mut ticket = String::new();
-        for pair in body.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                if k == "ticket" {
-                    ticket = urldecode(v);
-                }
-            }
-        }
+        let ticket = form_field(body, "ticket").unwrap_or_default();
         if ticket.trim().len() >= 40 {
             send(socket, "200 OK", "text/plain", "ok").await;
             return Ok(Action::Ticket(ticket.trim().to_string()));
@@ -305,7 +291,9 @@ where
 
     // GET /back — legacy redirect carrying the ticket (query or #fragment).
     if path == "/back" {
-        if let Some(t) = extract_ticket(path_and_query) {
+        let query = path_and_query.split_once('?').map(|(_, q)| q).unwrap_or("");
+        let state_ok = form_field(query, "state").as_deref() == Some(state);
+        if let Some(t) = extract_ticket(path_and_query).filter(|_| state_ok) {
             send(
                 socket,
                 "200 OK",
@@ -322,9 +310,11 @@ where
             "text/html; charset=utf-8",
             r#"<html><body><script>
             if (location.hash && location.hash.length > 1) {
-              location.replace('/back?' + location.hash.substring(1));
+              location.replace('/back?state=__STATE__&' + location.hash.substring(1));
             } else { document.write('<h2>Waiting for Ubisoft… complete sign-in in this tab.</h2>'); }
-            </script></body></html>"#,
+            </script></body></html>"#
+                .replace("__STATE__", &urlencode(state))
+                .as_str(),
         )
         .await;
         return Ok(Action::Served);
@@ -335,7 +325,8 @@ where
         .replace("__APP_ID__", &json_string(APP_ID))
         .replace("__GENOME_ID__", &json_string(GENOME_ID))
         .replace("__SDK_URL__", SDK_URL)
-        .replace("__LOGIN_URL__", &json_string(login_url));
+        .replace("__LOGIN_URL__", &json_string(login_url))
+        .replace("__STATE__", &json_string(state));
     send(socket, "200 OK", "text/html; charset=utf-8", &page).await;
     Ok(Action::Served)
 }
@@ -383,20 +374,7 @@ textarea{width:100%;height:64px;margin-top:.5rem;padding:.5rem;border:1px solid 
 background:#15151a;color:#ececf1;font:12px ui-monospace,monospace}
 </style></head><body>
 <div class=card>
-<form id=stage1 onsubmit="go(event)">
-<div class=step>Step 1 of 2 · Saved on this device</div>
-<h1>Save your account for games</h1>
-<p>This does <strong>not</strong> sign you in yet. Optima stores these locally so your games can present your Uplay account offline. <strong>You'll sign in to Ubisoft for real on the next step.</strong></p>
-<label for=email>Display email <span class=opt>(optional)</span></label>
-<input id=email name=email type=email autocomplete=email autofocus
-       placeholder="leave blank to use a made-up one">
-<button id=btn type=submit>Save &amp; continue to Ubisoft sign-in &rarr;</button>
-<div class=note>Only ever shown to the game, and only stored on this machine.
-Leave it blank and Optima makes one up. No password is asked for or kept —
-the DRM emu never checks one.</div>
-</form>
-<div id=stage2 style="display:none">
-<div class=step>Step 2 of 2 · Sign in to Ubisoft</div>
+<div id=stage2>
 <h1>Sign in to Ubisoft</h1>
 <p>Now authenticate with Ubisoft to get your session ticket. If a login window doesn't appear, use the button below. It closes itself when done.</p>
 <button id=signin class=alt style="display:none" onclick="popupLogin()">Sign in to Ubisoft</button>
@@ -409,7 +387,7 @@ the DRM emu never checks one.</div>
 </div>
 <script src="__SDK_URL__"></script>
 <script>
-const APP_ID=__APP_ID__, GENOME_ID=__GENOME_ID__, LOGIN_URL=__LOGIN_URL__;
+const APP_ID=__APP_ID__, GENOME_ID=__GENOME_ID__, LOGIN_URL=__LOGIN_URL__, STATE=__STATE__;
 const NEXT='https://connect.ubisoft.com/logged-in.html?appId='+APP_ID+'&lang=en-US&genomeId='+GENOME_ID;
 let sdkInst=null, delivered=false;
 function log(m){var el=document.getElementById('log');if(el){el.textContent+=m+'\n';el.scrollTop=el.scrollHeight;}}
@@ -438,7 +416,8 @@ function attempt(){
   log('Requesting ticket…');
   try{
     sdkInst.getTicket().subscribe(function(res){
-      log('getTicket → '+JSON.stringify(res));
+      // Never print the response itself: it is the ticket.
+      log('getTicket → '+(res?'fields: '+Object.keys(res).join(','):'empty'));
       var t=res&&(res.ticket||(res.payload&&res.payload.ticket));
       if(t)deliver(t); else showLogin();
     },function(err){log('getTicket error → '+JSON.stringify(err));showLogin();});
@@ -456,9 +435,10 @@ window.addEventListener('message',function(e){
   var d=e.data;
   // Diagnostic: surface any message from a ubisoft origin so we can see the
   // iframe handshake (ready / status) even without devtools.
+  // Topic only: message payloads can carry session values.
   if(/ubisoft/.test(e.origin||'')){
-    var s; try{s=typeof d==='string'?d:JSON.stringify(d);}catch(_){s='[unserializable]';}
-    if(s&&s.length<300) log('msg ‹'+e.origin+'›: '+s);
+    var topic=d&&(d.topic||(d.data&&d.data.txt))||(typeof d==='string'?'(string)':'(object)');
+    log('msg ‹'+e.origin+'›: '+topic);
   }
   if(d&&(d.topic==='ubisoftConnect@LOGGED_IN'||(d.data&&d.data.txt==='ubisoftConnect@LOGGED_IN'))){
     log('Detected sign-in — fetching ticket…');setTimeout(attempt,500);
@@ -469,25 +449,15 @@ async function deliver(ticket){
   log('Ticket captured ('+ticket.length+' chars). Saving…');
   var r;
   try{r=await fetch('/ticket',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:new URLSearchParams({ticket:ticket}).toString()});}catch(e){log('save failed → '+e);delivered=false;return;}
+    body:new URLSearchParams({ticket:ticket,state:STATE}).toString()});}catch(e){log('save failed → '+e);delivered=false;return;}
   if(!r.ok){log('server rejected ticket (HTTP '+r.status+') — will retry');delivered=false;return;}
   document.getElementById('stage2').innerHTML='<h1>Signed in ✓</h1><p>Credentials + ticket captured. Return to Optima — you can close this tab.</p>';
-}
-async function go(e){
-  e.preventDefault();
-  var btn=document.getElementById('btn');btn.disabled=true;btn.textContent='Saving…';
-  var email=document.getElementById('email').value.trim();
-
-  try{await fetch('/profile',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:new URLSearchParams({email:email}).toString()});}catch(_){}
-  document.getElementById('stage1').style.display='none';
-  document.getElementById('stage2').style.display='block';
-  initSdk();
 }
 function usePaste(){
   var t=document.getElementById('paste').value.trim();
   if(t.length>=40)deliver(t); else log('Pasted value too short to be a ticket.');
 }
+initSdk();
 </script></body></html>"#;
 
 /// First index of `needle` in `hay`.
@@ -576,4 +546,29 @@ fn urldecode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{post_is_ours, HOST, PORT};
+
+    fn head(origin: Option<&str>) -> String {
+        let mut h = "POST /ticket HTTP/1.1\r\nHost: x\r\n".to_string();
+        if let Some(o) = origin {
+            h.push_str(&format!("Origin: {o}\r\n"));
+        }
+        h
+    }
+
+    #[test]
+    fn only_our_page_may_post() {
+        let ours = format!("https://{HOST}:{PORT}");
+        assert!(post_is_ours(&head(Some(&ours)), "ticket=t&state=abc", "abc"));
+        // Right origin, wrong or missing state.
+        assert!(!post_is_ours(&head(Some(&ours)), "ticket=t&state=abd", "abc"));
+        assert!(!post_is_ours(&head(Some(&ours)), "ticket=t", "abc"));
+        // Right state, foreign or missing origin.
+        assert!(!post_is_ours(&head(Some("https://evil.example")), "state=abc", "abc"));
+        assert!(!post_is_ours(&head(None), "state=abc", "abc"));
+    }
 }

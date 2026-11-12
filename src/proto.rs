@@ -20,3 +20,7 @@ pub mod download {
 pub mod download_service {
     include!(concat!(env!("OUT_DIR"), "/mg.protocol.download_service.rs"));
 }
+
+pub mod download_install_state {
+    include!(concat!(env!("OUT_DIR"), "/mg.protocol.download_install_state.rs"));
+}

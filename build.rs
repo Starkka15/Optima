@@ -1,5 +1,5 @@
 fn main() {
-    for p in ["demux", "ownership", "download", "download_service"] {
+    for p in ["demux", "ownership", "download", "download_service", "download_install_state"] {
         println!("cargo:rerun-if-changed=proto/{p}.proto");
     }
     prost_build::compile_protos(
@@ -8,6 +8,7 @@ fn main() {
             "proto/ownership.proto",
             "proto/download.proto",
             "proto/download_service.proto",
+            "proto/download_install_state.proto",
         ],
         &["proto/"],
     )
