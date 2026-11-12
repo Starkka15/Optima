@@ -94,7 +94,7 @@ enum Cmd {
         exe: Option<String>,
     },
     /// Official Ubisoft Connect mode: install the client in its own prefix,
-    /// sign in once, and launch games through it instead of the shims.
+    /// sign in once, and launch games through it.
     Connect {
         #[command(subcommand)]
         cmd: ConnectCmd,

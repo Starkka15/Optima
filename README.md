@@ -32,6 +32,25 @@ games you actually own:
 If you don't own a game, Optima can't list it, can't download it, and won't
 launch it. That's the whole point.
 
+## Why Optima pairs with the official Ubisoft Connect client
+
+Optima used to launch games on its own, by swapping Ubisoft's loader DLLs in
+each game folder for compatibility shims. It worked, but it was a hack. Optima
+now hands every launch to **Ubisoft's own Connect client**, and that is more
+secure and much less hacky:
+
+| | Old shim launch | Optima + official Connect |
+|---|---|---|
+| **Sign-in** | Optima's ticket, fed to the shims | Ubisoft's own login inside Connect, including 2FA |
+| **Ownership and DRM** | Answered locally by the shims ("you own this") | Checked by Ubisoft, exactly as on Windows |
+| **Game files** | Ubisoft's DLLs replaced with third-party ones | Untouched (only the EAX audio fix below, removed when the game exits) |
+| **Proton prefix** | Trusted a self-signed Optima certificate | A separate prefix with no Optima certificate in it |
+| **Refunds, revoked or expired licenses** | Not seen by the shims | Enforced by Ubisoft |
+
+Optima still does what Connect can't do from Game Mode: list your library,
+download with progress and resume, and set the game up so Connect sees it as
+installed. Sign-in, ownership, DRM and launch belong to Ubisoft's client.
+
 ## What leaves your machine
 
 Only requests to **Ubisoft's own endpoints**:
