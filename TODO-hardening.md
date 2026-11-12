@@ -224,12 +224,21 @@ Each item below was checked against this tree before being listed.
       wiring (connect-mode default, first-launch sign-in); then remove the
       shims, the prefix cert and the shim launch path.
 
-## Planned — real Ubisoft login page (2026-11-11)
+## Real Ubisoft login page (2026-11-11)
 
-- [ ] Replace the self-signed `localhost.ubisoft.com` WebAuth page with
+- [x] Replace the self-signed `localhost.ubisoft.com` WebAuth page with
       Ubisoft's real login page in a browser window Optima controls, reading
       the session afterwards (as Lutris does), so users never click through a
       certificate warning. After the Connect work.
+      *Done 2026-11-12 in 0.4.0: `login --steam` opens connect.ubisoft.com in
+      Steam's own browser and reads `PRODloginData` through Steam's CEF
+      debugger (port 8080, on whenever Decky is installed), then closes the
+      tab. `login --local`, the WebAuth capture server and its self-signed
+      cert are gone (`webauth_capture.rs` removed, rcgen/uuid dropped).
+      Lutris's `change_domain` step is dead and isn't used. `login --ticket`
+      stays as the fallback when the debugger is unavailable. Tested from a
+      clean first run on the Ally: login, Connect install + sign-in, library,
+      download and launch of AC IV.*
 
 ## P6 — throughput (only after the above)
 

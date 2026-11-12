@@ -1,6 +1,6 @@
 [package]
 name = "optima-cli"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Optima — an ownership-backed Ubisoft Connect client (auth / library / install / launch), maxima-cli style"
@@ -30,13 +30,11 @@ base64 = "0.22"
 toml = "0.8"
 dirs = "5"
 rpassword = "7"
-uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 serde_yaml = "0.9"
 log = "0.4"
 env_logger = "0.11"
 open = "5"
-rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 
 [build-dependencies]
 prost-build = "0.13"

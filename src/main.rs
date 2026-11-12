@@ -12,11 +12,11 @@ mod auth;
 mod browser_login;
 mod config;
 mod connect;
+mod steam_login;
 mod demux;
 mod install;
 mod launch;
 mod proto;
-mod webauth_capture;
 
 use anyhow::{Context, Result};
 use auth::LoginOutcome;
@@ -44,18 +44,19 @@ enum Cmd {
         /// BOOTSTRAP: store a ubi_v1 ticket captured from a real browser
         /// session (devtools → any request to public-ubiservices.ubi.com →
         /// Authorization header → the part after `ubi_v1 t=`). Bypasses the
-        /// DataDome-walled password endpoint. Temporary until the embedded
-        /// webview login lands. Optionally pair with --session-id / --profile-id.
+        /// DataDome-walled password endpoint. For machines without Steam; use
+        /// --steam where Steam runs. Optionally pair with --session-id.
         #[arg(long)]
         ticket: Option<String>,
         /// Ubi-SessionId that goes with a pasted --ticket (devtools: the
         /// `Ubi-SessionId` request header). Needed for authorized REST calls.
         #[arg(long)]
         session_id: Option<String>,
-        /// SteamOS/no-devtools mode: host a local page with Ubisoft's WebAuth
-        /// SDK and capture the ticket automatically (no copy/paste).
+        /// Sign in on Ubisoft's real login page inside Steam's browser (Game
+        /// Mode friendly; needs Steam running with its browser debugger on,
+        /// which Decky Loader enables).
         #[arg(long)]
-        local: bool,
+        steam: bool,
     },
     /// List the games your Ubisoft account owns (via the Demux ownership service).
     ListGames {
@@ -188,9 +189,9 @@ async fn do_connect(cmd: ConnectCmd) -> Result<()> {
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     match Cli::parse().cmd {
-        Cmd::Login { email, password, ticket, session_id, local } => {
-            if local {
-                webauth_capture::run().await
+        Cmd::Login { email, password, ticket, session_id, steam } => {
+            if steam {
+                do_steam_login().await
             } else {
                 do_login(email, password, ticket, session_id).await
             }
@@ -204,6 +205,18 @@ async fn main() -> Result<()> {
         Cmd::Whoami => do_whoami().await,
         Cmd::Refresh => do_refresh().await,
     }
+}
+
+/// `login --steam`: Ubisoft's real login page in Steam's browser.
+async fn do_steam_login() -> Result<()> {
+    let auth = steam_login::run().await?;
+    config::save_auth(&auth)?;
+    if auth.name_on_platform.is_empty() {
+        println!("Signed in. Run `optima-cli list-games`.");
+    } else {
+        println!("Signed in as {}. Run `optima-cli list-games`.", auth.name_on_platform);
+    }
+    Ok(())
 }
 
 /// Load the stored ticket, exchange it for a Demux-app ticket (past DataDome),

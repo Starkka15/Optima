@@ -58,8 +58,7 @@ Only requests to **Ubisoft's own endpoints**:
 - `public-ubiservices.ubi.com` — login / session tickets (UbiServices)
 - `dmx.upc.ubisoft.com` — ownership + download services (the Demux protobuf API)
 - `*.cdn.ubi.com` / `uplaypc-s-ubisoft.cdn.ubi.com` — game files
-- `connect.ubisoft.com` / `ubistatic*.ubisoft.com` — the WebAuth SDK used for the
-  browser login
+- `connect.ubisoft.com` — Ubisoft's login page, opened in Steam's browser
 - `static3.cdn.ubi.com` — the official Ubisoft Connect installer
 
 The Ubisoft Connect client itself, once installed, talks to Ubisoft as it does
@@ -73,7 +72,7 @@ and never sent anywhere except Ubisoft. Read the source — it's all here.
 
 | Stage | What happens |
 |-------|--------------|
-| **Auth** | `optima-cli login --local` hosts a tiny local HTTPS page that embeds Ubisoft's official **WebAuth SDK** and captures a `ubi_v1` session ticket the same way the web login does. Works in any browser, no devtools. Renewed silently via the rememberMe ticket. **`login --local` will be removed in the next version**, replaced by Ubisoft's real login page, so there's no self-signed certificate warning to click through. |
+| **Auth** | `optima-cli login --steam` opens **Ubisoft's real login page** (`connect.ubisoft.com`) in Steam's own browser — the overlay browser in Game Mode, with the on-screen keyboard and 2FA. After you sign in, Optima reads the session Ubisoft's page stores (ticket, session id, rememberMe ticket) through Steam's browser debugger and closes the tab, as Lutris does with its own window. Renewed silently via the rememberMe ticket. |
 | **Library** | The Demux ownership service returns your owned products (each with an embedded configuration blob: real title, launch exe, Uplay app id). |
 | **Download** | An ownership token → a download-service session → signed CDN URLs. Manifests and slices are fetched, decompressed, verified and written to disk, with resume + reconnect for large titles. At the end Optima writes Connect's own install records (`uplay_install.manifest`, `uplay_install.state`) so the official client sees the game as installed. |
 | **Launch** | The official Ubisoft Connect client (installed once into its own Proton prefix) starts the game through its `uplay://launch/<id>/0` handler. Optima registers the install with it first, including the registry keys the game's installer would set. |
@@ -133,7 +132,7 @@ cargo build --release --target x86_64-unknown-linux-musl
 ## Usage
 
 ```bash
-optima-cli login --local              # sign in (browser, one time)
+optima-cli login --steam              # sign in on Ubisoft's page in Steam (one time)
 optima-cli list-games                 # your owned, installable games
 optima-cli install <product_id>       # download from Ubisoft's CDN
 optima-cli launch <product_id>        # start it through Ubisoft Connect
@@ -146,9 +145,15 @@ optima-cli whoami                     # show + verify the stored session
 `login`, session storage, and refresh all use your own Ubisoft account. Nothing
 is shared or centralized.
 
-> **Note:** `login --local` will be removed in the next version. Its local page
-> uses a self-signed certificate, so your browser shows a warning first. The
-> next version signs you in on Ubisoft's real login page instead.
+> **`login --steam` needs Steam running with its browser debugger on.** Decky
+> Loader turns it on, so it is always on for GameVault users. Elsewhere, create
+> `~/.steam/steam/.cef-enable-remote-debugging` and restart Steam. Without Steam,
+> `login --ticket` stores a ticket copied from a browser's developer tools.
+
+> **Switching accounts:** signing out of Optima doesn't sign you out of Ubisoft
+> in Steam's browser, so the next `login --steam` signs the same account straight
+> back in. To change accounts, sign out on Ubisoft's page in Steam's browser
+> first.
 
 ## Handheld / Steam Deck
 
