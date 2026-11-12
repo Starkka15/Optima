@@ -73,7 +73,7 @@ and never sent anywhere except Ubisoft. Read the source — it's all here.
 
 | Stage | What happens |
 |-------|--------------|
-| **Auth** | `optima-cli login --local` hosts a tiny local HTTPS page that embeds Ubisoft's official **WebAuth SDK** and captures a `ubi_v1` session ticket the same way the web login does. Works in any browser, no devtools. Renewed silently via the rememberMe ticket. |
+| **Auth** | `optima-cli login --local` hosts a tiny local HTTPS page that embeds Ubisoft's official **WebAuth SDK** and captures a `ubi_v1` session ticket the same way the web login does. Works in any browser, no devtools. Renewed silently via the rememberMe ticket. **`login --local` will be removed in the next version**, replaced by Ubisoft's real login page, so there's no self-signed certificate warning to click through. |
 | **Library** | The Demux ownership service returns your owned products (each with an embedded configuration blob: real title, launch exe, Uplay app id). |
 | **Download** | An ownership token → a download-service session → signed CDN URLs. Manifests and slices are fetched, decompressed, verified and written to disk, with resume + reconnect for large titles. At the end Optima writes Connect's own install records (`uplay_install.manifest`, `uplay_install.state`) so the official client sees the game as installed. |
 | **Launch** | The official Ubisoft Connect client (installed once into its own Proton prefix) starts the game through its `uplay://launch/<id>/0` handler. Optima registers the install with it first, including the registry keys the game's installer would set. |
@@ -144,6 +144,10 @@ optima-cli whoami                     # show + verify the stored session
 
 `login`, session storage, and refresh all use your own Ubisoft account. Nothing
 is shared or centralized.
+
+> **Note:** `login --local` will be removed in the next version. Its local page
+> uses a self-signed certificate, so your browser shows a warning first. The
+> next version signs you in on Ubisoft's real login page instead.
 
 ## Handheld / Steam Deck
 
