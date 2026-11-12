@@ -138,6 +138,7 @@ optima-cli list-games                 # your owned, installable games
 optima-cli install <product_id>       # download from Ubisoft's CDN
 optima-cli launch <product_id>        # start it through Ubisoft Connect
 optima-cli settings <product_id>      # run a game's settings/config app (resolution, etc.)
+optima-cli connect signin             # install Connect if needed, sign in, close it when done
 optima-cli connect status             # Connect installed / signed in / registered games
 optima-cli whoami                     # show + verify the stored session
 ```

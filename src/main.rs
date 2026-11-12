@@ -133,6 +133,9 @@ enum ConnectCmd {
     Setup,
     /// Open the Connect window (sign in once here; tick "remember me").
     Open,
+    /// Install Connect if needed, open it for sign-in, and close it once the
+    /// login is saved (for front ends; does nothing if already signed in).
+    Signin,
     /// Show whether Connect is installed and signed in, and its registered games.
     Status,
     /// Point Connect at an Optima install (done automatically on first launch).
@@ -167,6 +170,7 @@ async fn do_connect(cmd: ConnectCmd) -> Result<()> {
     match cmd {
         ConnectCmd::Setup => connect::setup().await,
         ConnectCmd::Open => connect::open(),
+        ConnectCmd::Signin => connect::signin().await,
         ConnectCmd::Status => connect::status(),
         ConnectCmd::Register { product_id, path } => {
             let dir = default_install_dir(product_id, path);

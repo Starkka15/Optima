@@ -280,6 +280,44 @@ pub fn open() -> Result<()> {
     Ok(())
 }
 
+/// One-step sign-in for front ends (GameVault's Login button): install Connect
+/// if needed, open it, and once it has saved a login, close it again so the
+/// caller gets control back without the user having to quit Connect by hand.
+/// Closing Connect yourself also ends it. Already signed in: nothing to do.
+pub async fn signin() -> Result<()> {
+    setup().await?;
+    let prefix = prefix()?;
+    if has_login(&prefix) {
+        println!("[connect] Connect is already signed in.");
+        return Ok(());
+    }
+    let exe = connect_exe(&prefix).ok_or_else(|| anyhow!("Connect is not installed"))?;
+    println!("[connect] opening Ubisoft Connect; sign in and tick \"remember me\".");
+    let mut child = wine(&prefix)?.arg(&exe).current_dir(launcher_dir(&prefix)).spawn()?;
+    let started = wait_for(|| process_running("upc.exe"), Duration::from_secs(120));
+    let deadline = Instant::now() + Duration::from_secs(30 * 60);
+    let mut signed_in_since: Option<Instant> = None;
+    while started && process_running("upc.exe") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(2));
+        if has_login(&prefix) {
+            // Give Connect time to finish writing its login before closing it.
+            if signed_in_since.get_or_insert_with(Instant::now).elapsed() >= Duration::from_secs(10) {
+                println!("[connect] signed in; closing Ubisoft Connect.");
+                break;
+            }
+        }
+    }
+    stop(&prefix);
+    let _ = child.kill();
+    let _ = child.wait();
+    if has_login(&prefix) {
+        println!("[connect] Connect has a remembered login.");
+        Ok(())
+    } else {
+        bail!("Connect was closed before a login was saved (sign in with \"remember me\" ticked)")
+    }
+}
+
 /// Connect's processes. It can linger after a game (Heroic sees the same and
 /// uses `pkill -f Ubisoft -9`), which would keep Steam showing "Playing".
 const CONNECT_IMAGES: &[&str] = &["upc.exe", "UbisoftConnect.exe", "UplayWebCore.exe", "UplayService.exe", "UbisoftGameLauncher.exe", "UbisoftGameLauncher64.exe", "UplayCrashReporter.exe"];
